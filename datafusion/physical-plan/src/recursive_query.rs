@@ -256,7 +256,7 @@ impl RecursiveQueryStream {
         static_stream: SendableRecordBatchStream,
         baseline_metrics: BaselineMetrics,
     ) -> Self {
-        let schema = static_stream.schema();
+        let schema = static_stream.schema().clone();
         let reservation =
             MemoryConsumer::new("RecursiveQuery").register(task_context.memory_pool());
         Self {
@@ -406,8 +406,8 @@ impl Stream for RecursiveQueryStream {
 
 impl RecordBatchStream for RecursiveQueryStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

@@ -101,11 +101,12 @@ impl CustomExecutionPlan {
 struct TestCustomRecordBatchStream {
     /// the nb of batches of TEST_CUSTOM_RECORD_BATCH generated
     nb_batch: i32,
+    schema: SchemaRef,
 }
 
 impl RecordBatchStream for TestCustomRecordBatchStream {
-    fn schema(&self) -> SchemaRef {
-        TEST_CUSTOM_SCHEMA_REF!()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -168,7 +169,7 @@ impl ExecutionPlan for CustomExecutionPlan {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        Ok(Box::pin(TestCustomRecordBatchStream { nb_batch: 1 }))
+        Ok(Box::pin(TestCustomRecordBatchStream { nb_batch: 1, schema: TEST_CUSTOM_SCHEMA_REF!() }))
     }
 
     fn statistics(&self) -> Result<Statistics> {

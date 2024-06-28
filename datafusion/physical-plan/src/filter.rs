@@ -396,8 +396,8 @@ impl Stream for FilterExecStream {
 }
 
 impl RecordBatchStream for FilterExecStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

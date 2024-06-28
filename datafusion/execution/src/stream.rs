@@ -26,7 +26,7 @@ pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     ///
     /// Implementation of this trait should guarantee that all `RecordBatch`'s returned by this
     /// stream should have the same schema as returned from this method.
-    fn schema(&self) -> SchemaRef;
+    fn schema(&self) -> &SchemaRef;
 }
 
 /// Trait for a [`Stream`] of [`RecordBatch`]es

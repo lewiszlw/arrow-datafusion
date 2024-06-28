@@ -452,7 +452,7 @@ impl LimitStream {
         fetch: Option<usize>,
         baseline_metrics: BaselineMetrics,
     ) -> Self {
-        let schema = input.schema();
+        let schema = input.schema().clone();
         Self {
             skip,
             fetch: fetch.unwrap_or(usize::MAX),
@@ -472,7 +472,7 @@ impl LimitStream {
             let poll = poll.map_ok(|batch| {
                 if batch.num_rows() <= self.skip {
                     self.skip -= batch.num_rows();
-                    RecordBatch::new_empty(input.schema())
+                    RecordBatch::new_empty(input.schema().clone())
                 } else {
                     let new_batch = batch.slice(self.skip, batch.num_rows() - self.skip);
                     self.skip = 0;
@@ -550,8 +550,8 @@ impl Stream for LimitStream {
 
 impl RecordBatchStream for LimitStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

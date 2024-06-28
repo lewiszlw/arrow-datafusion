@@ -104,7 +104,7 @@ pub(crate) fn spawn_buffered(
         Ok(handle)
             if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
         {
-            let mut builder = RecordBatchReceiverStream::builder(input.schema(), buffer);
+            let mut builder = RecordBatchReceiverStream::builder(input.schema().clone(), buffer);
 
             let sender = builder.tx();
 

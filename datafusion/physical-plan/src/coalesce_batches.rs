@@ -271,8 +271,8 @@ impl CoalesceBatchesStream {
 }
 
 impl RecordBatchStream for CoalesceBatchesStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

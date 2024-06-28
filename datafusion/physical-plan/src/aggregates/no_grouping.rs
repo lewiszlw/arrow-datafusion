@@ -180,8 +180,8 @@ impl Stream for AggregateStream {
 }
 
 impl RecordBatchStream for AggregateStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

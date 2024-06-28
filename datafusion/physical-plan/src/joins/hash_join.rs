@@ -1110,8 +1110,8 @@ struct HashJoinStream {
 }
 
 impl RecordBatchStream for HashJoinStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -1497,7 +1497,7 @@ impl HashJoinStream {
             build_side.left_data.visited_indices_bitmap(),
             self.join_type,
         );
-        let empty_right_batch = RecordBatch::new_empty(self.right.schema());
+        let empty_right_batch = RecordBatch::new_empty(self.right.schema().clone());
         // use the left and right indices to produce the batch result
         let result = build_batch_from_indices(
             &self.schema,

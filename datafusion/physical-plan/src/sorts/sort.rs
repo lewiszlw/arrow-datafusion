@@ -938,7 +938,7 @@ impl ExecutionPlan for SortExec {
         if let Some(fetch) = self.fetch.as_ref() {
             let mut topk = TopK::try_new(
                 partition,
-                input.schema(),
+                input.schema().clone(),
                 self.expr.clone(),
                 *fetch,
                 context.session_config().batch_size(),
@@ -961,7 +961,7 @@ impl ExecutionPlan for SortExec {
         } else {
             let mut sorter = ExternalSorter::new(
                 partition,
-                input.schema(),
+                input.schema().clone(),
                 self.expr.clone(),
                 context.session_config().batch_size(),
                 self.fetch,

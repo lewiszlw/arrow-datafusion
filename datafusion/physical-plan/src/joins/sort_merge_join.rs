@@ -656,8 +656,8 @@ struct SMJStream {
 }
 
 impl RecordBatchStream for SMJStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -773,8 +773,8 @@ impl SMJStream {
         join_metrics: SortMergeJoinMetrics,
         reservation: MemoryReservation,
     ) -> Result<Self> {
-        let streamed_schema = streamed.schema();
-        let buffered_schema = buffered.schema();
+        let streamed_schema = streamed.schema().clone();
+        let buffered_schema = buffered.schema().clone();
         Ok(Self {
             state: SMJState::Init,
             sort_options,

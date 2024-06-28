@@ -106,8 +106,8 @@ impl Stream for TestStream {
 
 impl RecordBatchStream for TestStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.data[0].schema()
+    fn schema(&self) -> &SchemaRef {
+        self.data[0].schema_ref()
     }
 }
 
@@ -693,8 +693,8 @@ impl Stream for BlockingStream {
 }
 
 impl RecordBatchStream for BlockingStream {
-    fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -859,7 +859,7 @@ impl Stream for PanicStream {
 }
 
 impl RecordBatchStream for PanicStream {
-    fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }

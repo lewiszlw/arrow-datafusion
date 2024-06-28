@@ -381,8 +381,8 @@ impl<S> RecordBatchStream for RecordBatchStreamAdapter<S>
 where
     S: Stream<Item = Result<RecordBatch>>,
 {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -401,8 +401,8 @@ impl EmptyRecordBatchStream {
 }
 
 impl RecordBatchStream for EmptyRecordBatchStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -437,7 +437,7 @@ impl ObservedStream {
 }
 
 impl RecordBatchStream for ObservedStream {
-    fn schema(&self) -> arrow::datatypes::SchemaRef {
+    fn schema(&self) -> &SchemaRef {
         self.inner.schema()
     }
 }

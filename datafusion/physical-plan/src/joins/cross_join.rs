@@ -336,8 +336,8 @@ struct CrossJoinStream {
 }
 
 impl RecordBatchStream for CrossJoinStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

@@ -346,8 +346,8 @@ impl Stream for UnboundedStream {
 }
 
 impl RecordBatchStream for UnboundedStream {
-    fn schema(&self) -> SchemaRef {
-        self.batch.schema()
+    fn schema(&self) -> &SchemaRef {
+        self.batch.schema_ref()
     }
 }
 

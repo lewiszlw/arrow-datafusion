@@ -558,8 +558,8 @@ struct SymmetricHashJoinStream {
 }
 
 impl RecordBatchStream for SymmetricHashJoinStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

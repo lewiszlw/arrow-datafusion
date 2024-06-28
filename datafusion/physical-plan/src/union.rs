@@ -517,8 +517,8 @@ impl CombinedRecordBatchStream {
 }
 
 impl RecordBatchStream for CombinedRecordBatchStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

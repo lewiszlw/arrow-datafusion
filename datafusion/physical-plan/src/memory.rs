@@ -304,8 +304,8 @@ impl Stream for MemoryStream {
 
 impl RecordBatchStream for MemoryStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

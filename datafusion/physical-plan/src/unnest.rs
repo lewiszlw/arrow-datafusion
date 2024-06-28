@@ -236,8 +236,8 @@ struct UnnestStream {
 }
 
 impl RecordBatchStream for UnnestStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

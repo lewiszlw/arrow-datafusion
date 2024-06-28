@@ -668,7 +668,7 @@ impl Stream for TopKReader {
 }
 
 impl RecordBatchStream for TopKReader {
-    fn schema(&self) -> SchemaRef {
+    fn schema(&self) -> &SchemaRef {
         self.input.schema()
     }
 }

@@ -514,8 +514,8 @@ impl Stream for GroupedHashAggregateStream {
 }
 
 impl RecordBatchStream for GroupedHashAggregateStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -627,7 +627,7 @@ impl GroupedHashAggregateStream {
         let schema = if spilling {
             self.spill_state.spill_schema.clone()
         } else {
-            self.schema()
+            self.schema().clone()
         };
         if self.group_values.is_empty() {
             return Ok(RecordBatch::new_empty(schema));
@@ -714,7 +714,7 @@ impl GroupedHashAggregateStream {
     /// Clear memory and shirk capacities to zero.
     fn clear_all(&mut self) {
         let s = self.schema();
-        self.clear_shrink(&RecordBatch::new_empty(s));
+        self.clear_shrink(&RecordBatch::new_empty(s.clone()));
     }
 
     /// Emit if the used memory exceeds the target for partial aggregation.

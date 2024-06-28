@@ -939,8 +939,8 @@ impl Stream for RepartitionStream {
 
 impl RecordBatchStream for RepartitionStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -989,8 +989,8 @@ impl Stream for PerPartitionStream {
 
 impl RecordBatchStream for PerPartitionStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

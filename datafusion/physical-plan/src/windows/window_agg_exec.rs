@@ -411,7 +411,7 @@ impl WindowAggStream {
 
 impl RecordBatchStream for WindowAggStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }

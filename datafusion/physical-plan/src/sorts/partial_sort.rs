@@ -343,7 +343,7 @@ impl Stream for PartialSortStream {
 }
 
 impl RecordBatchStream for PartialSortStream {
-    fn schema(&self) -> SchemaRef {
+    fn schema(&self) -> &SchemaRef {
         self.input.schema()
     }
 }
@@ -369,7 +369,7 @@ impl PartialSortStream {
                     sorted_batch
                 } else {
                     self.in_mem_batches.push(batch);
-                    Ok(RecordBatch::new_empty(self.schema()))
+                    Ok(RecordBatch::new_empty(self.schema().clone()))
                 }
             }
             Some(Err(e)) => Err(e),

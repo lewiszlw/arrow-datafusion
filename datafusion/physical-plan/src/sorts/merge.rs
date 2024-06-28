@@ -323,7 +323,7 @@ impl<C: CursorValues + Unpin> Stream for SortPreservingMergeStream<C> {
 }
 
 impl<C: CursorValues + Unpin> RecordBatchStream for SortPreservingMergeStream<C> {
-    fn schema(&self) -> SchemaRef {
-        self.in_progress.schema().clone()
+    fn schema(&self) -> &SchemaRef {
+        self.in_progress.schema()
     }
 }

@@ -83,8 +83,8 @@ impl GroupedTopKAggregateStream {
 }
 
 impl RecordBatchStream for GroupedTopKAggregateStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

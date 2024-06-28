@@ -524,7 +524,7 @@ impl NestedLoopJoinStream {
                                 self.join_type,
                             );
                         let empty_right_batch =
-                            RecordBatch::new_empty(self.outer_table.schema());
+                            RecordBatch::new_empty(self.outer_table.schema().clone());
                         // use the left and right indices to produce the batch result
                         let result = build_batch_from_indices(
                             &self.schema,
@@ -640,8 +640,8 @@ impl Stream for NestedLoopJoinStream {
 }
 
 impl RecordBatchStream for NestedLoopJoinStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 

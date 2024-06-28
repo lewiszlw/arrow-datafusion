@@ -1113,8 +1113,8 @@ impl BoundedWindowAggStream {
 
 impl RecordBatchStream for BoundedWindowAggStream {
     /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 }
 
@@ -1286,8 +1286,8 @@ mod tests {
     }
 
     impl RecordBatchStream for TestStreamPartition {
-        fn schema(&self) -> SchemaRef {
-            self.schema.clone()
+        fn schema(&self) -> &SchemaRef {
+            &self.schema
         }
     }
 

@@ -508,8 +508,8 @@ impl<F: FileOpener> Stream for FileStream<F> {
 }
 
 impl<F: FileOpener> RecordBatchStream for FileStream<F> {
-    fn schema(&self) -> SchemaRef {
-        self.projected_schema.clone()
+    fn schema(&self) -> &SchemaRef {
+        &self.projected_schema
     }
 }
 
