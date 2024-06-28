@@ -163,7 +163,7 @@ impl BoundedWindowAggExec {
     fn get_search_algo(&self) -> Result<Box<dyn PartitionSearcher>> {
         let partition_by_sort_keys = self.partition_by_sort_keys()?;
         let ordered_partition_by_indices = self.ordered_partition_by_indices.clone();
-        let input_schema = self.input().schema();
+        let input_schema = self.input().schema().clone();
         Ok(match &self.input_order_mode {
             InputOrderMode::Sorted => {
                 // In Sorted mode, all partition by columns should be ordered.

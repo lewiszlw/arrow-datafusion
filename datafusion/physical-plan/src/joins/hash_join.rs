@@ -765,7 +765,7 @@ impl ExecutionPlan for HashJoinExec {
         };
 
         Ok(Box::pin(HashJoinStream {
-            schema: self.schema(),
+            schema: self.schema().clone(),
             on_left,
             on_right,
             filter: self.filter.clone(),
@@ -825,7 +825,7 @@ async fn collect_left_input(
     with_visited_indices_bitmap: bool,
     probe_threads_count: usize,
 ) -> Result<JoinLeftData> {
-    let schema = left.schema();
+    let schema = left.schema().clone();
 
     let (left_input, left_input_partition) = if let Some(partition) = partition {
         (left, partition)

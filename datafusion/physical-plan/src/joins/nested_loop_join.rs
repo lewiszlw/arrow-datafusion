@@ -354,7 +354,7 @@ async fn collect_left_input(
     with_visited_left_side: bool,
     probe_threads_count: usize,
 ) -> Result<JoinLeftData> {
-    let schema = input.schema();
+    let schema = input.schema().clone();
     let merge = if input.output_partitioning().partition_count() != 1 {
         Arc::new(CoalescePartitionsExec::new(input))
     } else {

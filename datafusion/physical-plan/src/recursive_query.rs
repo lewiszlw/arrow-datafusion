@@ -83,7 +83,7 @@ impl RecursiveQueryExec {
         let work_table = Arc::new(WorkTable::new());
         // Use the same work table for both the WorkTableExec and the recursive term
         let recursive_term = assign_work_table(recursive_term, work_table.clone())?;
-        let cache = Self::compute_properties(static_term.schema());
+        let cache = Self::compute_properties(static_term.schema().clone());
         Ok(RecursiveQueryExec {
             name,
             static_term,

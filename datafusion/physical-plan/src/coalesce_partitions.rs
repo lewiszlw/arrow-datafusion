@@ -147,7 +147,7 @@ impl ExecutionPlan for CoalescePartitionsExec {
                 // least one result in an attempt to maximize
                 // parallelism.
                 let mut builder =
-                    RecordBatchReceiverStream::builder(self.schema(), input_partitions);
+                    RecordBatchReceiverStream::builder(self.schema().clone(), input_partitions);
 
                 // spawn independent tasks whose resulting streams (of batches)
                 // are sent to the channel for consumption.

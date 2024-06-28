@@ -920,7 +920,7 @@ impl DefaultPhysicalPlanner {
             }) => {
                 // Initially need to perform the aggregate and then merge the partitions
                 let input_exec = children.one()?;
-                let physical_input_schema = input_exec.schema();
+                let physical_input_schema = input_exec.schema().clone();
                 let logical_input_schema = input.as_ref().schema();
 
                 let groups = self.create_grouping_physical_expr(
@@ -2081,13 +2081,13 @@ impl DefaultPhysicalPlanner {
 
         let mut new_plan = plan;
         for optimizer in optimizers {
-            let before_schema = new_plan.schema();
+            let before_schema = new_plan.schema().clone();
             new_plan = optimizer
                 .optimize(new_plan, session_state.config_options())
                 .map_err(|e| {
                     DataFusionError::Context(optimizer.name().to_string(), Box::new(e))
                 })?;
-            if optimizer.schema_check() && new_plan.schema() != before_schema {
+            if optimizer.schema_check() && new_plan.schema() != &before_schema {
                 let e = DataFusionError::Internal(format!(
                     "PhysicalOptimizer rule '{}' failed, due to generate a different schema, original schema: {:?}, new schema: {:?}",
                     optimizer.name(),

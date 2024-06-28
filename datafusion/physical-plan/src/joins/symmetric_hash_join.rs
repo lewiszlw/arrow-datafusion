@@ -485,9 +485,9 @@ impl ExecutionPlan for SymmetricHashJoinExec {
         let (on_left, on_right) = self.on.iter().cloned().unzip();
 
         let left_side_joiner =
-            OneSideHashJoiner::new(JoinSide::Left, on_left, self.left.schema());
+            OneSideHashJoiner::new(JoinSide::Left, on_left, self.left.schema().clone());
         let right_side_joiner =
-            OneSideHashJoiner::new(JoinSide::Right, on_right, self.right.schema());
+            OneSideHashJoiner::new(JoinSide::Right, on_right, self.right.schema().clone());
 
         let left_stream = self.left.execute(partition, context.clone())?;
 
@@ -504,7 +504,7 @@ impl ExecutionPlan for SymmetricHashJoinExec {
         Ok(Box::pin(SymmetricHashJoinStream {
             left_stream,
             right_stream,
-            schema: self.schema(),
+            schema: self.schema().clone(),
             filter: self.filter.clone(),
             join_type: self.join_type,
             random_state: self.random_state.clone(),

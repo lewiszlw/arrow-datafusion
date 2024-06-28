@@ -143,8 +143,8 @@ pub trait ExecutionPlan: Debug + DisplayAs + Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
     /// Get the schema for this execution plan
-    fn schema(&self) -> SchemaRef {
-        self.properties().schema().clone()
+    fn schema(&self) -> &SchemaRef {
+        self.properties().schema()
     }
 
     /// Return properties of the output of the `ExecutionPlan`, such as output
@@ -721,7 +721,7 @@ pub fn execute_stream(
     context: Arc<TaskContext>,
 ) -> Result<SendableRecordBatchStream> {
     match plan.output_partitioning().partition_count() {
-        0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
+        0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema().clone()))),
         1 => plan.execute(0, context),
         _ => {
             // merge into a single partition

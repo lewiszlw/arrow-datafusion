@@ -1010,7 +1010,7 @@ impl AsExecutionPlan for protobuf::PhysicalPlanNode {
                     .as_ref()
                     .ok_or_else(|| proto_error("Missing required field in protobuf"))?
                     .try_into()?;
-                let sink_schema = input.schema();
+                let sink_schema = input.schema().clone();
                 let sort_order = sink
                     .sort_order
                     .as_ref()
@@ -1040,7 +1040,7 @@ impl AsExecutionPlan for protobuf::PhysicalPlanNode {
                     .as_ref()
                     .ok_or_else(|| proto_error("Missing required field in protobuf"))?
                     .try_into()?;
-                let sink_schema = input.schema();
+                let sink_schema = input.schema().clone();
                 let sort_order = sink
                     .sort_order
                     .as_ref()
@@ -1070,7 +1070,7 @@ impl AsExecutionPlan for protobuf::PhysicalPlanNode {
                     .as_ref()
                     .ok_or_else(|| proto_error("Missing required field in protobuf"))?
                     .try_into()?;
-                let sink_schema = input.schema();
+                let sink_schema = input.schema().clone();
                 let sort_order = sink
                     .sort_order
                     .as_ref()

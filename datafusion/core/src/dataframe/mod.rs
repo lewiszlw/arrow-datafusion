@@ -1617,7 +1617,7 @@ impl DataFrame {
         let context = SessionContext::new_with_state((*self.session_state).clone());
         // The schema is consistent with the output
         let plan = self.clone().create_physical_plan().await?;
-        let schema = plan.schema();
+        let schema = plan.schema().clone();
         let task_ctx = Arc::new(self.task_ctx());
         let partitions = collect_partitioned(plan, task_ctx).await?;
         let mem_table = MemTable::try_new(schema, partitions)?;

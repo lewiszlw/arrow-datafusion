@@ -146,7 +146,7 @@ async fn load_left_input(
     reservation: MemoryReservation,
 ) -> Result<JoinLeftData> {
     // merge all left parts into a single stream
-    let left_schema = left.schema();
+    let left_schema = left.schema().clone();
     let merge = if left.output_partitioning().partition_count() != 1 {
         Arc::new(CoalescePartitionsExec::new(left))
     } else {
@@ -261,7 +261,7 @@ impl ExecutionPlan for CrossJoinExec {
             left_index: 0,
             join_metrics,
             state: CrossJoinStreamState::WaitBuildSide,
-            left_data: RecordBatch::new_empty(self.left().schema()),
+            left_data: RecordBatch::new_empty(self.left().schema().clone()),
         }))
     }
 

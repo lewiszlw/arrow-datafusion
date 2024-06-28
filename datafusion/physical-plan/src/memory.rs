@@ -211,7 +211,7 @@ impl MemoryExec {
 
         // We need to update equivalence properties when updating sort information.
         let eq_properties = EquivalenceProperties::new_with_orderings(
-            self.schema(),
+            self.schema().clone(),
             &self.sort_information,
         );
         self.cache = self.cache.with_eq_properties(eq_properties);

@@ -219,7 +219,7 @@ impl ExecutionPlan for MockExec {
             .collect();
 
         if self.use_task {
-            let mut builder = RecordBatchReceiverStream::builder(self.schema(), 2);
+            let mut builder = RecordBatchReceiverStream::builder(self.schema().clone(), 2);
             // send data in order but in a separate task (to ensure
             // the batches are not available without the stream
             // yielding).
@@ -240,7 +240,7 @@ impl ExecutionPlan for MockExec {
             // make an input that will error
             let stream = futures::stream::iter(data);
             Ok(Box::pin(RecordBatchStreamAdapter::new(
-                self.schema(),
+                self.schema().clone(),
                 stream,
             )))
         }
@@ -370,7 +370,7 @@ impl ExecutionPlan for BarrierExec {
     ) -> Result<SendableRecordBatchStream> {
         assert!(partition < self.data.len());
 
-        let mut builder = RecordBatchReceiverStream::builder(self.schema(), 2);
+        let mut builder = RecordBatchReceiverStream::builder(self.schema().clone(), 2);
 
         // task simply sends data in order after barrier is reached
         let data = self.data[partition].clone();

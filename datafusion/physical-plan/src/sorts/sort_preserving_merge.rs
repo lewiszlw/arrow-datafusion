@@ -207,7 +207,7 @@ impl ExecutionPlan for SortPreservingMergeExec {
             "Number of input partitions of  SortPreservingMergeExec::execute: {}",
             input_partitions
         );
-        let schema = self.schema();
+        let schema = self.schema().clone();
 
         let reservation =
             MemoryConsumer::new(format!("SortPreservingMergeExec[{partition}]"))

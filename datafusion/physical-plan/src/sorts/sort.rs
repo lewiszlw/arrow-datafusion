@@ -948,7 +948,7 @@ impl ExecutionPlan for SortExec {
             )?;
 
             Ok(Box::pin(RecordBatchStreamAdapter::new(
-                self.schema(),
+                self.schema().clone(),
                 futures::stream::once(async move {
                     while let Some(batch) = input.next().await {
                         let batch = batch?;
@@ -972,7 +972,7 @@ impl ExecutionPlan for SortExec {
             );
 
             Ok(Box::pin(RecordBatchStreamAdapter::new(
-                self.schema(),
+                self.schema().clone(),
                 futures::stream::once(async move {
                     while let Some(batch) = input.next().await {
                         let batch = batch?;

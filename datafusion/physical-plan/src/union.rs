@@ -425,7 +425,7 @@ impl ExecutionPlan for InterleaveExec {
         }
         if input_stream_vec.len() == self.inputs.len() {
             let stream = Box::pin(CombinedRecordBatchStream::new(
-                self.schema(),
+                self.schema().clone(),
                 input_stream_vec,
             ));
             return Ok(Box::pin(ObservedStream::new(stream, baseline_metrics)));

@@ -50,7 +50,7 @@ pub async fn plan_to_parquet(
         let mut stream = plan.execute(i, task_ctx.clone())?;
         join_set.spawn(async move {
             let mut writer =
-                AsyncArrowWriter::try_new(buf_writer, plan.schema(), propclone)?;
+                AsyncArrowWriter::try_new(buf_writer, plan.schema().clone(), propclone)?;
             while let Some(next_batch) = stream.next().await {
                 let batch = next_batch?;
                 writer.write(&batch).await?;

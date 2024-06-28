@@ -271,7 +271,7 @@ impl ExecutionPlan for FilterExec {
         trace!("Start FilterExec::execute for partition {} of context session_id {} and task_id {:?}", partition, context.session_id(), context.task_id());
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
         Ok(Box::pin(FilterExecStream {
-            schema: self.input.schema(),
+            schema: self.input.schema().clone(),
             predicate: self.predicate.clone(),
             input: self.input.execute(partition, context)?,
             baseline_metrics,

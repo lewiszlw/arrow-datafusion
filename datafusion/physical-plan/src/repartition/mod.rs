@@ -560,7 +560,7 @@ impl ExecutionPlan for RepartitionExec {
         let metrics = self.metrics.clone();
         let preserve_order = self.preserve_order;
         let name = self.name().to_owned();
-        let schema = self.schema();
+        let schema = self.schema().clone();
         let schema_captured = Arc::clone(&schema);
 
         // Get existing ordering to use for merging
@@ -641,7 +641,7 @@ impl ExecutionPlan for RepartitionExec {
                 Ok(Box::pin(RepartitionStream {
                     num_input_partitions,
                     num_input_partitions_processed: 0,
-                    schema: input.schema(),
+                    schema: input.schema().clone(),
                     input: rx.swap_remove(0),
                     drop_helper: abort_helper,
                     reservation,

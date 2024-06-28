@@ -629,7 +629,7 @@ fn try_pushdown_through_hash_join(
 
     if !join_allows_pushdown(
         &projection_as_columns,
-        hash_join.schema(),
+        hash_join.schema().clone(),
         far_right_left_col_ind,
         far_left_right_col_ind,
     ) {
@@ -698,7 +698,7 @@ fn try_swapping_with_cross_join(
 
     if !join_allows_pushdown(
         &projection_as_columns,
-        cross_join.schema(),
+        cross_join.schema().clone(),
         far_right_left_col_ind,
         far_left_right_col_ind,
     ) {
@@ -738,7 +738,7 @@ fn try_swapping_with_nested_loop_join(
 
     if !join_allows_pushdown(
         &projection_as_columns,
-        nl_join.schema(),
+        nl_join.schema().clone(),
         far_right_left_col_ind,
         far_left_right_col_ind,
     ) {
@@ -795,7 +795,7 @@ fn try_swapping_with_sort_merge_join(
 
     if !join_allows_pushdown(
         &projection_as_columns,
-        sm_join.schema(),
+        sm_join.schema().clone(),
         far_right_left_col_ind,
         far_left_right_col_ind,
     ) {
@@ -848,7 +848,7 @@ fn try_swapping_with_sym_hash_join(
 
     if !join_allows_pushdown(
         &projection_as_columns,
-        sym_join.schema(),
+        sym_join.schema().clone(),
         far_right_left_col_ind,
         far_left_right_col_ind,
     ) {
@@ -1167,14 +1167,14 @@ fn update_join_filter(
         join_filter,
         JoinSide::Left,
         projection_left_exprs,
-        join_left.schema(),
+        join_left.schema().clone(),
     )
     .into_iter();
     let mut new_right_indices = new_indices_for_join_filter(
         join_filter,
         JoinSide::Right,
         projection_right_exprs,
-        join_right.schema(),
+        join_right.schema().clone(),
     )
     .into_iter();
 
