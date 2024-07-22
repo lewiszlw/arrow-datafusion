@@ -478,7 +478,7 @@ struct ConstEvaluator<'a> {
 #[allow(dead_code)]
 /// The simplify result of ConstEvaluator
 enum ConstSimplifyResult {
-    // Expr was simplifed and contains the new expression
+    // Expr was simplified and contains the new expression
     Simplified(ScalarValue),
     // Expr was not simplified and original value is returned
     NotSimplified(ScalarValue),
@@ -519,7 +519,7 @@ impl<'a> TreeNodeRewriter for ConstEvaluator<'a> {
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
         match self.can_evaluate.pop() {
             // Certain expressions such as `CASE` and `COALESCE` are short circuiting
-            // and may not evalute all their sub expressions. Thus if
+            // and may not evaluate all their sub expressions. Thus if
             // if any error is countered during simplification, return the original
             // so that normal evaluation can occur
             Some(true) => {
@@ -656,12 +656,35 @@ impl<'a> ConstEvaluator<'a> {
                 } else {
                     // Non-ListArray
                     match ScalarValue::try_from_array(&a, 0) {
-                        Ok(s) => ConstSimplifyResult::Simplified(s),
+                        Ok(s) => {
+                            // TODO: support the optimization for `Map` type after support impl hash for it
+                            if matches!(&s, ScalarValue::Map(_)) {
+                                ConstSimplifyResult::SimplifyRuntimeError(
+                                    DataFusionError::NotImplemented("Const evaluate for Map type is still not supported".to_string()),
+                                    expr,
+                                )
+                            } else {
+                                ConstSimplifyResult::Simplified(s)
+                            }
+                        }
                         Err(err) => ConstSimplifyResult::SimplifyRuntimeError(err, expr),
                     }
                 }
             }
-            ColumnarValue::Scalar(s) => ConstSimplifyResult::Simplified(s),
+            ColumnarValue::Scalar(s) => {
+                // TODO: support the optimization for `Map` type after support impl hash for it
+                if matches!(&s, ScalarValue::Map(_)) {
+                    ConstSimplifyResult::SimplifyRuntimeError(
+                        DataFusionError::NotImplemented(
+                            "Const evaluate for Map type is still not supported"
+                                .to_string(),
+                        ),
+                        expr,
+                    )
+                } else {
+                    ConstSimplifyResult::Simplified(s)
+                }
+            }
         }
     }
 }
@@ -1807,8 +1830,9 @@ mod tests {
     fn basic_coercion() {
         let schema = test_schema();
         let props = ExecutionProps::new();
-        let simplifier =
-            ExprSimplifier::new(SimplifyContext::new(&props).with_schema(schema.clone()));
+        let simplifier = ExprSimplifier::new(
+            SimplifyContext::new(&props).with_schema(Arc::clone(&schema)),
+        );
 
         // Note expr type is int32 (not int64)
         // (1i64 + 2i32) < i
@@ -3005,7 +3029,7 @@ mod tests {
 
     fn expr_test_schema() -> DFSchemaRef {
         Arc::new(
-            DFSchema::from_unqualifed_fields(
+            DFSchema::from_unqualified_fields(
                 vec![
                     Field::new("c1", DataType::Utf8, true),
                     Field::new("c2", DataType::Boolean, true),
@@ -3340,15 +3364,15 @@ mod tests {
         assert_eq!(
             simplify(in_list(
                 col("c1"),
-                vec![scalar_subquery(subquery.clone())],
+                vec![scalar_subquery(Arc::clone(&subquery))],
                 false
             )),
-            in_subquery(col("c1"), subquery.clone())
+            in_subquery(col("c1"), Arc::clone(&subquery))
         );
         assert_eq!(
             simplify(in_list(
                 col("c1"),
-                vec![scalar_subquery(subquery.clone())],
+                vec![scalar_subquery(Arc::clone(&subquery))],
                 true
             )),
             not_in_subquery(col("c1"), subquery)

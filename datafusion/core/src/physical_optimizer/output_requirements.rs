@@ -24,7 +24,6 @@
 
 use std::sync::Arc;
 
-use crate::physical_optimizer::PhysicalOptimizerRule;
 use crate::physical_plan::sorts::sort::SortExec;
 use crate::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan};
 
@@ -32,6 +31,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{Result, Statistics};
 use datafusion_physical_expr::{Distribution, LexRequirement, PhysicalSortRequirement};
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion_physical_plan::{ExecutionPlanProperties, PlanProperties};
 
@@ -248,7 +248,9 @@ fn require_top_ordering_helper(
     if children.len() != 1 {
         Ok((plan, false))
     } else if let Some(sort_exec) = plan.as_any().downcast_ref::<SortExec>() {
-        let req_ordering = sort_exec.properties().output_ordering().unwrap_or(&[]);
+        // In case of constant columns, output ordering of SortExec would give an empty set.
+        // Therefore; we check the sort expression field of the SortExec to assign the requirements.
+        let req_ordering = sort_exec.expr();
         let req_dist = sort_exec.required_input_distribution()[0].clone();
         let reqs = PhysicalSortRequirement::from_sort_exprs(req_ordering);
         Ok((

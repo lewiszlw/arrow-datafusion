@@ -38,7 +38,6 @@ use crate::logical_expr::{
 };
 use crate::logical_expr::{Limit, Values};
 use crate::physical_expr::{create_physical_expr, create_physical_exprs};
-use crate::physical_optimizer::optimizer::PhysicalOptimizerRule;
 use crate::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use crate::physical_plan::analyze::AnalyzeExec;
 use crate::physical_plan::empty::EmptyExec;
@@ -91,6 +90,7 @@ use datafusion_physical_plan::placeholder_row::PlaceholderRowExec;
 use datafusion_sql::utils::window_expr_common_partition_keys;
 
 use async_trait::async_trait;
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use futures::{StreamExt, TryStreamExt};
 use itertools::{multiunzip, Itertools};
 use log::{debug, trace};
@@ -775,6 +775,16 @@ impl DefaultPhysicalPlanner {
                     .map(|s| (s.to_string(), arrow_schema::DataType::Null))
                     .collect::<Vec<_>>();
 
+                let keep_partition_by_columns = match source_option_tuples
+                    .get("execution.keep_partition_by_columns")
+                    .map(|v| v.trim()) {
+                    None => session_state.config().options().execution.keep_partition_by_columns,
+                    Some("true") => true,
+                    Some("false") => false,
+                    Some(value) =>
+                        return Err(DataFusionError::Configuration(format!("provided value for 'execution.keep_partition_by_columns' was not recognized: \"{}\"", value))),
+                };
+
                 // Set file sink related options
                 let config = FileSinkConfig {
                     object_store_url,
@@ -783,6 +793,7 @@ impl DefaultPhysicalPlanner {
                     output_schema: Arc::new(schema),
                     table_partition_cols,
                     overwrite: false,
+                    keep_partition_by_columns,
                 };
 
                 let sink_format = file_type_to_format(file_type)?
@@ -1828,7 +1839,34 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                 .unwrap_or(sqlparser::ast::NullTreatment::RespectNulls)
                 == NullTreatment::IgnoreNulls;
 
+            // TODO: Remove this after array_agg are all udafs
             let (agg_expr, filter, order_by) = match func_def {
+                AggregateFunctionDefinition::UDF(udf)
+                    if udf.name() == "ARRAY_AGG" && order_by.is_some() =>
+                {
+                    // not yet support UDAF, fallback to builtin
+                    let physical_sort_exprs = match order_by {
+                        Some(exprs) => Some(create_physical_sort_exprs(
+                            exprs,
+                            logical_input_schema,
+                            execution_props,
+                        )?),
+                        None => None,
+                    };
+                    let ordering_reqs: Vec<PhysicalSortExpr> =
+                        physical_sort_exprs.clone().unwrap_or(vec![]);
+                    let fun = aggregates::AggregateFunction::ArrayAgg;
+                    let agg_expr = aggregates::create_aggregate_expr(
+                        &fun,
+                        *distinct,
+                        &physical_args,
+                        &ordering_reqs,
+                        physical_input_schema,
+                        name,
+                        ignore_nulls,
+                    )?;
+                    (agg_expr, filter, physical_sort_exprs)
+                }
                 AggregateFunctionDefinition::BuiltIn(fun) => {
                     let physical_sort_exprs = match order_by {
                         Some(exprs) => Some(create_physical_sort_exprs(
@@ -1877,6 +1915,7 @@ pub fn create_aggregate_expr_with_name_and_maybe_filter(
                     (agg_expr, filter, physical_sort_exprs)
                 }
             };
+
             Ok((agg_expr, filter, order_by))
         }
         other => internal_err!("Invalid aggregate expression '{other:?}'"),
@@ -1972,23 +2011,37 @@ impl DefaultPhysicalPlanner {
                     .await
                 {
                     Ok(input) => {
-                        // This plan will includes statistics if show_statistics is on
+                        // Include statistics / schema if enabled
                         stringified_plans.push(
                             displayable(input.as_ref())
                                 .set_show_statistics(config.show_statistics)
+                                .set_show_schema(config.show_schema)
                                 .to_stringified(e.verbose, InitialPhysicalPlan),
                         );
 
-                        // If the show_statisitcs is off, add another line to show statsitics in the case of explain verbose
-                        if e.verbose && !config.show_statistics {
-                            stringified_plans.push(
-                                displayable(input.as_ref())
-                                    .set_show_statistics(true)
-                                    .to_stringified(
-                                        e.verbose,
-                                        InitialPhysicalPlanWithStats,
-                                    ),
-                            );
+                        // Show statistics + schema in verbose output even if not
+                        // explicitly requested
+                        if e.verbose {
+                            if !config.show_statistics {
+                                stringified_plans.push(
+                                    displayable(input.as_ref())
+                                        .set_show_statistics(true)
+                                        .to_stringified(
+                                            e.verbose,
+                                            InitialPhysicalPlanWithStats,
+                                        ),
+                                );
+                            }
+                            if !config.show_schema {
+                                stringified_plans.push(
+                                    displayable(input.as_ref())
+                                        .set_show_schema(true)
+                                        .to_stringified(
+                                            e.verbose,
+                                            InitialPhysicalPlanWithSchema,
+                                        ),
+                                );
+                            }
                         }
 
                         let optimized_plan = self.optimize_internal(
@@ -2000,6 +2053,7 @@ impl DefaultPhysicalPlanner {
                                 stringified_plans.push(
                                     displayable(plan)
                                         .set_show_statistics(config.show_statistics)
+                                        .set_show_schema(config.show_schema)
                                         .to_stringified(e.verbose, plan_type),
                                 );
                             },
@@ -2010,19 +2064,33 @@ impl DefaultPhysicalPlanner {
                                 stringified_plans.push(
                                     displayable(input.as_ref())
                                         .set_show_statistics(config.show_statistics)
+                                        .set_show_schema(config.show_schema)
                                         .to_stringified(e.verbose, FinalPhysicalPlan),
                                 );
 
-                                // If the show_statisitcs is off, add another line to show statsitics in the case of explain verbose
-                                if e.verbose && !config.show_statistics {
-                                    stringified_plans.push(
-                                        displayable(input.as_ref())
-                                            .set_show_statistics(true)
-                                            .to_stringified(
-                                                e.verbose,
-                                                FinalPhysicalPlanWithStats,
-                                            ),
-                                    );
+                                // Show statistics + schema in verbose output even if not
+                                // explicitly requested
+                                if e.verbose {
+                                    if !config.show_statistics {
+                                        stringified_plans.push(
+                                            displayable(input.as_ref())
+                                                .set_show_statistics(true)
+                                                .to_stringified(
+                                                    e.verbose,
+                                                    FinalPhysicalPlanWithStats,
+                                                ),
+                                        );
+                                    }
+                                    if !config.show_schema {
+                                        stringified_plans.push(
+                                            displayable(input.as_ref())
+                                                .set_show_schema(true)
+                                                .to_stringified(
+                                                    e.verbose,
+                                                    FinalPhysicalPlanWithSchema,
+                                                ),
+                                        );
+                                    }
                                 }
                             }
                             Err(DataFusionError::Context(optimizer_name, e)) => {
@@ -2229,6 +2297,7 @@ mod tests {
     use crate::prelude::{SessionConfig, SessionContext};
     use crate::test_util::{scan_empty, scan_empty_with_partitions};
 
+    use crate::execution::session_state::SessionStateBuilder;
     use arrow::array::{ArrayRef, DictionaryArray, Int32Array};
     use arrow::datatypes::{DataType, Field, Int32Type};
     use datafusion_common::{assert_contains, DFSchemaRef, TableReference};
@@ -2242,7 +2311,11 @@ mod tests {
         let runtime = Arc::new(RuntimeEnv::default());
         let config = SessionConfig::new().with_target_partitions(4);
         let config = config.set_bool("datafusion.optimizer.skip_failed_rules", false);
-        SessionState::new_with_config_rt(config, runtime)
+        SessionStateBuilder::new()
+            .with_config(config)
+            .with_runtime_env(runtime)
+            .with_default_features()
+            .build()
     }
 
     async fn plan(logical_plan: &LogicalPlan) -> Result<Arc<dyn ExecutionPlan>> {
@@ -2272,7 +2345,7 @@ mod tests {
         // verify that the plan correctly casts u8 to i64
         // the cast from u8 to i64 for literal will be simplified, and get lit(int64(5))
         // the cast here is implicit so has CastOptions with safe=true
-        let expected = "BinaryExpr { left: Column { name: \"c7\", index: 2 }, op: Lt, right: Literal { value: Int64(5) } }";
+        let expected = "BinaryExpr { left: Column { name: \"c7\", index: 2 }, op: Lt, right: Literal { value: Int64(5) }, fail_on_overflow: false }";
         assert!(format!("{exec_plan:?}").contains(expected));
         Ok(())
     }
@@ -2511,7 +2584,7 @@ mod tests {
         let execution_plan = plan(&logical_plan).await?;
         // verify that the plan correctly adds cast from Int64(1) to Utf8, and the const will be evaluated.
 
-        let expected = "expr: [(BinaryExpr { left: BinaryExpr { left: Column { name: \"c1\", index: 0 }, op: Eq, right: Literal { value: Utf8(\"a\") } }, op: Or, right: BinaryExpr { left: Column { name: \"c1\", index: 0 }, op: Eq, right: Literal { value: Utf8(\"1\") } } }";
+        let expected = "expr: [(BinaryExpr { left: BinaryExpr { left: Column { name: \"c1\", index: 0 }, op: Eq, right: Literal { value: Utf8(\"a\") }, fail_on_overflow: false }, op: Or, right: BinaryExpr { left: Column { name: \"c1\", index: 0 }, op: Eq, right: Literal { value: Utf8(\"1\") }, fail_on_overflow: false }, fail_on_overflow: false }";
 
         let actual = format!("{execution_plan:?}");
         assert!(actual.contains(expected), "{}", actual);
@@ -2752,7 +2825,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 schema: DFSchemaRef::new(
-                    DFSchema::from_unqualifed_fields(
+                    DFSchema::from_unqualified_fields(
                         vec![Field::new("a", DataType::Int32, false)].into(),
                         HashMap::new(),
                     )

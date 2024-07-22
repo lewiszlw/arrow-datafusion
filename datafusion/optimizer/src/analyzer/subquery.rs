@@ -16,6 +16,7 @@
 // under the License.
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use crate::analyzer::check_plan;
 use crate::utils::collect_subquery_cols;
@@ -158,11 +159,11 @@ fn check_inner_plan(
             let (correlated, _): (Vec<_>, Vec<_>) = split_conjunction(predicate)
                 .into_iter()
                 .partition(|e| e.contains_outer());
-            let maybe_unsupport = correlated
+            let maybe_unsupported = correlated
                 .into_iter()
                 .filter(|expr| !can_pullup_over_aggregation(expr))
                 .collect::<Vec<_>>();
-            if is_aggregate && is_scalar && !maybe_unsupport.is_empty() {
+            if is_aggregate && is_scalar && !maybe_unsupported.is_empty() {
                 return plan_err!(
                     "Correlated column is not allowed in predicate: {predicate}"
                 );
@@ -245,7 +246,7 @@ fn check_aggregation_in_scalar_subquery(
     if !agg.group_expr.is_empty() {
         let correlated_exprs = get_correlated_expressions(inner_plan)?;
         let inner_subquery_cols =
-            collect_subquery_cols(&correlated_exprs, agg.input.schema().clone())?;
+            collect_subquery_cols(&correlated_exprs, Arc::clone(agg.input.schema()))?;
         let mut group_columns = agg
             .group_expr
             .iter()
@@ -375,7 +376,7 @@ mod test {
             _inputs: Vec<LogicalPlan>,
         ) -> Result<Self> {
             Ok(Self {
-                empty_schema: self.empty_schema.clone(),
+                empty_schema: Arc::clone(&self.empty_schema),
             })
         }
     }

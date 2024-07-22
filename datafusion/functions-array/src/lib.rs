@@ -14,6 +14,8 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
+// Make cheap clones clear: https://github.com/apache/datafusion/issues/11143
+#![deny(clippy::clone_on_ref_ptr)]
 
 //! Array Functions for [DataFusion].
 //!
@@ -39,6 +41,7 @@ pub mod extract;
 pub mod flatten;
 pub mod length;
 pub mod make_array;
+pub mod planner;
 pub mod position;
 pub mod range;
 pub mod remove;
@@ -46,12 +49,10 @@ pub mod repeat;
 pub mod replace;
 pub mod resize;
 pub mod reverse;
-pub mod rewrite;
 pub mod set_ops;
 pub mod sort;
 pub mod string;
 pub mod utils;
-
 use datafusion_common::Result;
 use datafusion_execution::FunctionRegistry;
 use datafusion_expr::ScalarUDF;
@@ -152,7 +153,6 @@ pub fn register_all(registry: &mut dyn FunctionRegistry) -> Result<()> {
         }
         Ok(()) as Result<()>
     })?;
-    registry.register_function_rewrite(Arc::new(rewrite::ArrayFunctionRewriter {}))?;
 
     Ok(())
 }

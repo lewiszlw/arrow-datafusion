@@ -34,9 +34,9 @@ use crate::protobuf::{
     self,
     plan_type::PlanTypeEnum::{
         AnalyzedLogicalPlan, FinalAnalyzedLogicalPlan, FinalLogicalPlan,
-        FinalPhysicalPlan, FinalPhysicalPlanWithStats, InitialLogicalPlan,
-        InitialPhysicalPlan, InitialPhysicalPlanWithStats, OptimizedLogicalPlan,
-        OptimizedPhysicalPlan,
+        FinalPhysicalPlan, FinalPhysicalPlanWithSchema, FinalPhysicalPlanWithStats,
+        InitialLogicalPlan, InitialPhysicalPlan, InitialPhysicalPlanWithSchema,
+        InitialPhysicalPlanWithStats, OptimizedLogicalPlan, OptimizedPhysicalPlan,
     },
     AnalyzedLogicalPlanType, CubeNode, EmptyMessage, GroupingSetNode, LogicalExprList,
     OptimizedLogicalPlanType, OptimizedPhysicalPlanType, PlaceholderNode, RollupNode,
@@ -96,8 +96,14 @@ impl From<&StringifiedPlan> for protobuf::StringifiedPlan {
                 PlanType::InitialPhysicalPlanWithStats => Some(protobuf::PlanType {
                     plan_type_enum: Some(InitialPhysicalPlanWithStats(EmptyMessage {})),
                 }),
+                PlanType::InitialPhysicalPlanWithSchema => Some(protobuf::PlanType {
+                    plan_type_enum: Some(InitialPhysicalPlanWithSchema(EmptyMessage {})),
+                }),
                 PlanType::FinalPhysicalPlanWithStats => Some(protobuf::PlanType {
                     plan_type_enum: Some(FinalPhysicalPlanWithStats(EmptyMessage {})),
+                }),
+                PlanType::FinalPhysicalPlanWithSchema => Some(protobuf::PlanType {
+                    plan_type_enum: Some(FinalPhysicalPlanWithSchema(EmptyMessage {})),
                 }),
             },
             plan: stringified_plan.plan.to_string(),
@@ -111,8 +117,6 @@ impl From<&AggregateFunction> for protobuf::AggregateFunction {
             AggregateFunction::Min => Self::Min,
             AggregateFunction::Max => Self::Max,
             AggregateFunction::ArrayAgg => Self::ArrayAgg,
-            AggregateFunction::Grouping => Self::Grouping,
-            AggregateFunction::NthValue => Self::NthValueAgg,
         }
     }
 }
@@ -315,25 +319,37 @@ pub fn serialize_expr(
             // TODO: support null treatment in proto
             null_treatment: _,
         }) => {
-            let window_function = match fun {
-                WindowFunctionDefinition::AggregateFunction(fun) => {
+            let (window_function, fun_definition) = match fun {
+                WindowFunctionDefinition::AggregateFunction(fun) => (
                     protobuf::window_expr_node::WindowFunction::AggrFunction(
                         protobuf::AggregateFunction::from(fun).into(),
-                    )
-                }
-                WindowFunctionDefinition::BuiltInWindowFunction(fun) => {
+                    ),
+                    None,
+                ),
+                WindowFunctionDefinition::BuiltInWindowFunction(fun) => (
                     protobuf::window_expr_node::WindowFunction::BuiltInFunction(
                         protobuf::BuiltInWindowFunction::from(fun).into(),
-                    )
-                }
+                    ),
+                    None,
+                ),
                 WindowFunctionDefinition::AggregateUDF(aggr_udf) => {
-                    protobuf::window_expr_node::WindowFunction::Udaf(
-                        aggr_udf.name().to_string(),
+                    let mut buf = Vec::new();
+                    let _ = codec.try_encode_udaf(aggr_udf, &mut buf);
+                    (
+                        protobuf::window_expr_node::WindowFunction::Udaf(
+                            aggr_udf.name().to_string(),
+                        ),
+                        (!buf.is_empty()).then_some(buf),
                     )
                 }
                 WindowFunctionDefinition::WindowUDF(window_udf) => {
-                    protobuf::window_expr_node::WindowFunction::Udwf(
-                        window_udf.name().to_string(),
+                    let mut buf = Vec::new();
+                    let _ = codec.try_encode_udwf(window_udf, &mut buf);
+                    (
+                        protobuf::window_expr_node::WindowFunction::Udwf(
+                            window_udf.name().to_string(),
+                        ),
+                        (!buf.is_empty()).then_some(buf),
                     )
                 }
             };
@@ -354,6 +370,7 @@ pub fn serialize_expr(
                 partition_by,
                 order_by,
                 window_frame,
+                fun_definition,
             });
             protobuf::LogicalExprNode {
                 expr_type: Some(ExprType::WindowExpr(window_expr)),
@@ -372,10 +389,6 @@ pub fn serialize_expr(
                     AggregateFunction::ArrayAgg => protobuf::AggregateFunction::ArrayAgg,
                     AggregateFunction::Min => protobuf::AggregateFunction::Min,
                     AggregateFunction::Max => protobuf::AggregateFunction::Max,
-                    AggregateFunction::Grouping => protobuf::AggregateFunction::Grouping,
-                    AggregateFunction::NthValue => {
-                        protobuf::AggregateFunction::NthValueAgg
-                    }
                 };
 
                 let aggregate_expr = protobuf::AggregateExprNode {
@@ -395,23 +408,30 @@ pub fn serialize_expr(
                     expr_type: Some(ExprType::AggregateExpr(Box::new(aggregate_expr))),
                 }
             }
-            AggregateFunctionDefinition::UDF(fun) => protobuf::LogicalExprNode {
-                expr_type: Some(ExprType::AggregateUdfExpr(Box::new(
-                    protobuf::AggregateUdfExprNode {
-                        fun_name: fun.name().to_string(),
-                        args: serialize_exprs(args, codec)?,
-                        distinct: *distinct,
-                        filter: match filter {
-                            Some(e) => Some(Box::new(serialize_expr(e.as_ref(), codec)?)),
-                            None => None,
+            AggregateFunctionDefinition::UDF(fun) => {
+                let mut buf = Vec::new();
+                let _ = codec.try_encode_udaf(fun, &mut buf);
+                protobuf::LogicalExprNode {
+                    expr_type: Some(ExprType::AggregateUdfExpr(Box::new(
+                        protobuf::AggregateUdfExprNode {
+                            fun_name: fun.name().to_string(),
+                            args: serialize_exprs(args, codec)?,
+                            distinct: *distinct,
+                            filter: match filter {
+                                Some(e) => {
+                                    Some(Box::new(serialize_expr(e.as_ref(), codec)?))
+                                }
+                                None => None,
+                            },
+                            order_by: match order_by {
+                                Some(e) => serialize_exprs(e, codec)?,
+                                None => vec![],
+                            },
+                            fun_definition: (!buf.is_empty()).then_some(buf),
                         },
-                        order_by: match order_by {
-                            Some(e) => serialize_exprs(e, codec)?,
-                            None => vec![],
-                        },
-                    },
-                ))),
-            },
+                    ))),
+                }
+            }
         },
 
         Expr::ScalarVariable(_, _) => {
@@ -420,17 +440,13 @@ pub fn serialize_expr(
             ))
         }
         Expr::ScalarFunction(ScalarFunction { func, args }) => {
-            let args = serialize_exprs(args, codec)?;
             let mut buf = Vec::new();
-            let _ = codec.try_encode_udf(func.as_ref(), &mut buf);
-
-            let fun_definition = if buf.is_empty() { None } else { Some(buf) };
-
+            let _ = codec.try_encode_udf(func, &mut buf);
             protobuf::LogicalExprNode {
                 expr_type: Some(ExprType::ScalarUdfExpr(protobuf::ScalarUdfExprNode {
                     fun_name: func.name().to_string(),
-                    fun_definition,
-                    args,
+                    fun_definition: (!buf.is_empty()).then_some(buf),
+                    args: serialize_exprs(args, codec)?,
                 })),
             }
         }

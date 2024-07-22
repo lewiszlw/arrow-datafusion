@@ -36,6 +36,9 @@ use datafusion_expr::{
 };
 use datafusion_proto_common::{from_proto::FromOptionalField, FromProtoError as Error};
 
+use crate::protobuf::plan_type::PlanTypeEnum::{
+    FinalPhysicalPlanWithSchema, InitialPhysicalPlanWithSchema,
+};
 use crate::protobuf::{
     self,
     plan_type::PlanTypeEnum::{
@@ -121,6 +124,7 @@ impl From<&protobuf::StringifiedPlan> for StringifiedPlan {
                 FinalLogicalPlan(_) => PlanType::FinalLogicalPlan,
                 InitialPhysicalPlan(_) => PlanType::InitialPhysicalPlan,
                 InitialPhysicalPlanWithStats(_) => PlanType::InitialPhysicalPlanWithStats,
+                InitialPhysicalPlanWithSchema(_) => PlanType::InitialPhysicalPlanWithSchema,
                 OptimizedPhysicalPlan(OptimizedPhysicalPlanType { optimizer_name }) => {
                     PlanType::OptimizedPhysicalPlan {
                         optimizer_name: optimizer_name.clone(),
@@ -128,6 +132,7 @@ impl From<&protobuf::StringifiedPlan> for StringifiedPlan {
                 }
                 FinalPhysicalPlan(_) => PlanType::FinalPhysicalPlan,
                 FinalPhysicalPlanWithStats(_) => PlanType::FinalPhysicalPlanWithStats,
+                FinalPhysicalPlanWithSchema(_) => PlanType::FinalPhysicalPlanWithSchema,
             },
             plan: Arc::new(stringified_plan.plan.clone()),
         }
@@ -140,8 +145,6 @@ impl From<protobuf::AggregateFunction> for AggregateFunction {
             protobuf::AggregateFunction::Min => Self::Min,
             protobuf::AggregateFunction::Max => Self::Max,
             protobuf::AggregateFunction::ArrayAgg => Self::ArrayAgg,
-            protobuf::AggregateFunction::Grouping => Self::Grouping,
-            protobuf::AggregateFunction::NthValueAgg => Self::NthValue,
         }
     }
 }
@@ -266,11 +269,7 @@ pub fn parse_expr(
             Ok(operands
                 .into_iter()
                 .reduce(|left, right| {
-                    Expr::BinaryExpr(BinaryExpr::new(
-                        Box::new(left),
-                        op.clone(),
-                        Box::new(right),
-                    ))
+                    Expr::BinaryExpr(BinaryExpr::new(Box::new(left), op, Box::new(right)))
                 })
                 .expect("Binary expression could not be reduced to a single expression."))
         }
@@ -309,14 +308,17 @@ pub fn parse_expr(
                     let aggr_function = parse_i32_to_aggregate_function(i)?;
 
                     Ok(Expr::WindowFunction(WindowFunction::new(
-                        datafusion_expr::expr::WindowFunctionDefinition::AggregateFunction(
-                            aggr_function,
-                        ),
-                        vec![parse_required_expr(expr.expr.as_deref(), registry, "expr", codec)?],
+                        expr::WindowFunctionDefinition::AggregateFunction(aggr_function),
+                        vec![parse_required_expr(
+                            expr.expr.as_deref(),
+                            registry,
+                            "expr",
+                            codec,
+                        )?],
                         partition_by,
                         order_by,
                         window_frame,
-                        None
+                        None,
                     )))
                 }
                 window_expr_node::WindowFunction::BuiltInFunction(i) => {
@@ -330,26 +332,28 @@ pub fn parse_expr(
                             .unwrap_or_else(Vec::new);
 
                     Ok(Expr::WindowFunction(WindowFunction::new(
-                        datafusion_expr::expr::WindowFunctionDefinition::BuiltInWindowFunction(
+                        expr::WindowFunctionDefinition::BuiltInWindowFunction(
                             built_in_function,
                         ),
                         args,
                         partition_by,
                         order_by,
                         window_frame,
-                        null_treatment
+                        null_treatment,
                     )))
                 }
                 window_expr_node::WindowFunction::Udaf(udaf_name) => {
-                    let udaf_function = registry.udaf(udaf_name)?;
+                    let udaf_function = match &expr.fun_definition {
+                        Some(buf) => codec.try_decode_udaf(udaf_name, buf)?,
+                        None => registry.udaf(udaf_name)?,
+                    };
+
                     let args =
                         parse_optional_expr(expr.expr.as_deref(), registry, codec)?
                             .map(|e| vec![e])
                             .unwrap_or_else(Vec::new);
                     Ok(Expr::WindowFunction(WindowFunction::new(
-                        datafusion_expr::expr::WindowFunctionDefinition::AggregateUDF(
-                            udaf_function,
-                        ),
+                        expr::WindowFunctionDefinition::AggregateUDF(udaf_function),
                         args,
                         partition_by,
                         order_by,
@@ -358,15 +362,17 @@ pub fn parse_expr(
                     )))
                 }
                 window_expr_node::WindowFunction::Udwf(udwf_name) => {
-                    let udwf_function = registry.udwf(udwf_name)?;
+                    let udwf_function = match &expr.fun_definition {
+                        Some(buf) => codec.try_decode_udwf(udwf_name, buf)?,
+                        None => registry.udwf(udwf_name)?,
+                    };
+
                     let args =
                         parse_optional_expr(expr.expr.as_deref(), registry, codec)?
                             .map(|e| vec![e])
                             .unwrap_or_else(Vec::new);
                     Ok(Expr::WindowFunction(WindowFunction::new(
-                        datafusion_expr::expr::WindowFunctionDefinition::WindowUDF(
-                            udwf_function,
-                        ),
+                        expr::WindowFunctionDefinition::WindowUDF(udwf_function),
                         args,
                         partition_by,
                         order_by,
@@ -614,7 +620,10 @@ pub fn parse_expr(
             )))
         }
         ExprType::AggregateUdfExpr(pb) => {
-            let agg_fn = registry.udaf(pb.fun_name.as_str())?;
+            let agg_fn = match &pb.fun_definition {
+                Some(buf) => codec.try_decode_udaf(&pb.fun_name, buf)?,
+                None => registry.udaf(&pb.fun_name)?,
+            };
 
             Ok(Expr::AggregateFunction(expr::AggregateFunction::new_udf(
                 agg_fn,

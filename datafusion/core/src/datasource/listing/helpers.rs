@@ -261,7 +261,7 @@ async fn prune_partitions(
         .collect();
     let schema = Arc::new(Schema::new(fields));
 
-    let df_schema = DFSchema::from_unqualifed_fields(
+    let df_schema = DFSchema::from_unqualified_fields(
         partition_cols
             .iter()
             .map(|(n, d)| Field::new(n, d.clone(), true))
@@ -759,7 +759,7 @@ mod tests {
                 .otherwise(lit(false))
                 .expect("valid case expr"))
         ));
-        // static expression not relvant in this context but we
+        // static expression not relevant in this context but we
         // test it as an edge case anyway in case we want to generalize
         // this helper function
         assert!(expr_applicable_for_cols(&[], &lit(true)));

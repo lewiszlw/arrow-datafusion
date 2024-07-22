@@ -18,6 +18,7 @@
 use std::any::Any;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::vec;
 
 use arrow_schema::TimeUnit::Nanosecond;
@@ -37,10 +38,11 @@ use datafusion_sql::{
     planner::{ParserOptions, SqlToRel},
 };
 
-use datafusion_functions_aggregate::average::avg_udaf;
+use datafusion_functions::core::planner::CoreFunctionPlanner;
 use datafusion_functions_aggregate::{
     approx_median::approx_median_udaf, count::count_udaf,
 };
+use datafusion_functions_aggregate::{average::avg_udaf, grouping::grouping_udaf};
 use rstest::rstest;
 use sqlparser::dialect::{Dialect, GenericDialect, HiveDialect, MySqlDialect};
 
@@ -84,6 +86,7 @@ fn parse_decimals() {
             ParserOptions {
                 parse_float_as_decimal: true,
                 enable_ident_normalization: false,
+                support_varchar_with_length: false,
             },
         );
     }
@@ -137,6 +140,7 @@ fn parse_ident_normalization() {
             ParserOptions {
                 parse_float_as_decimal: false,
                 enable_ident_normalization,
+                support_varchar_with_length: false,
             },
         );
         if plan.is_ok() {
@@ -1142,7 +1146,7 @@ fn select_aggregate_with_group_by_with_having_that_reuses_aggregate_multiple_tim
 }
 
 #[test]
-fn select_aggregate_with_group_by_with_having_using_aggreagate_not_in_select() {
+fn select_aggregate_with_group_by_with_having_using_aggregate_not_in_select() {
     let sql = "SELECT first_name, MAX(age)
                    FROM person
                    GROUP BY first_name
@@ -1183,7 +1187,7 @@ fn select_aggregate_compound_aliased_with_group_by_with_having_referencing_compo
 }
 
 #[test]
-fn select_aggregate_with_group_by_with_having_using_derived_column_aggreagate_not_in_select(
+fn select_aggregate_with_group_by_with_having_using_derived_column_aggregate_not_in_select(
 ) {
     let sql = "SELECT first_name, MAX(age)
                    FROM person
@@ -1222,22 +1226,6 @@ fn select_binary_expr_nested() {
     let sql = "SELECT (age + salary)/2 from person";
     let expected = "Projection: (person.age + person.salary) / Int64(2)\
                         \n  TableScan: person";
-    quick_test(sql, expected);
-}
-
-#[test]
-fn select_at_arrow_operator() {
-    let sql = "SELECT left @> right from array";
-    let expected = "Projection: array.left @> array.right\
-                        \n  TableScan: array";
-    quick_test(sql, expected);
-}
-
-#[test]
-fn select_arrow_at_operator() {
-    let sql = "SELECT left <@ right from array";
-    let expected = "Projection: array.left <@ array.right\
-                        \n  TableScan: array";
     quick_test(sql, expected);
 }
 
@@ -2707,7 +2695,9 @@ fn logical_plan_with_dialect_and_options(
         .with_udaf(sum_udaf())
         .with_udaf(approx_median_udaf())
         .with_udaf(count_udaf())
-        .with_udaf(avg_udaf());
+        .with_udaf(avg_udaf())
+        .with_udaf(grouping_udaf())
+        .with_expr_planner(Arc::new(CoreFunctionPlanner::default()));
 
     let planner = SqlToRel::new_with_options(&context, options);
     let result = DFParser::parse_sql_with_dialect(sql, dialect);
@@ -3111,8 +3101,8 @@ fn aggregate_with_rollup() {
 fn aggregate_with_rollup_with_grouping() {
     let sql = "SELECT id, state, age, grouping(state), grouping(age), grouping(state) + grouping(age), count(*) \
         FROM person GROUP BY id, ROLLUP (state, age)";
-    let expected = "Projection: person.id, person.state, person.age, GROUPING(person.state), GROUPING(person.age), GROUPING(person.state) + GROUPING(person.age), count(*)\
-    \n  Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[GROUPING(person.state), GROUPING(person.age), count(*)]]\
+    let expected = "Projection: person.id, person.state, person.age, grouping(person.state), grouping(person.age), grouping(person.state) + grouping(person.age), count(*)\
+    \n  Aggregate: groupBy=[[GROUPING SETS ((person.id), (person.id, person.state), (person.id, person.state, person.age))]], aggr=[[grouping(person.state), grouping(person.age), count(*)]]\
     \n    TableScan: person";
     quick_test(sql, expected);
 }
@@ -3132,9 +3122,9 @@ fn rank_partition_grouping() {
             from
                 person
             group by rollup(state, last_name)";
-    let expected = "Projection: sum(person.age) AS total_sum, person.state, person.last_name, GROUPING(person.state) + GROUPING(person.last_name) AS x, RANK() PARTITION BY [GROUPING(person.state) + GROUPING(person.last_name), CASE WHEN GROUPING(person.last_name) = Int64(0) THEN person.state END] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS the_rank\
-        \n  WindowAggr: windowExpr=[[RANK() PARTITION BY [GROUPING(person.state) + GROUPING(person.last_name), CASE WHEN GROUPING(person.last_name) = Int64(0) THEN person.state END] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]\
-        \n    Aggregate: groupBy=[[ROLLUP (person.state, person.last_name)]], aggr=[[sum(person.age), GROUPING(person.state), GROUPING(person.last_name)]]\
+    let expected = "Projection: sum(person.age) AS total_sum, person.state, person.last_name, grouping(person.state) + grouping(person.last_name) AS x, RANK() PARTITION BY [grouping(person.state) + grouping(person.last_name), CASE WHEN grouping(person.last_name) = Int64(0) THEN person.state END] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS the_rank\
+        \n  WindowAggr: windowExpr=[[RANK() PARTITION BY [grouping(person.state) + grouping(person.last_name), CASE WHEN grouping(person.last_name) = Int64(0) THEN person.state END] ORDER BY [sum(person.age) DESC NULLS FIRST] RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]\
+        \n    Aggregate: groupBy=[[ROLLUP (person.state, person.last_name)]], aggr=[[sum(person.age), grouping(person.state), grouping(person.last_name)]]\
         \n      TableScan: person";
     quick_test(sql, expected);
 }
@@ -3640,7 +3630,7 @@ fn test_prepare_statement_to_plan_panic_prepare_wrong_syntax() {
     let sql = "PREPARE AS SELECT id, age  FROM person WHERE age = $foo";
     assert_eq!(
         logical_plan(sql).unwrap_err().strip_backtrace(),
-        "SQL error: ParserError(\"Expected AS, found: SELECT\")"
+        "SQL error: ParserError(\"Expected: AS, found: SELECT\")"
     )
 }
 
@@ -3681,7 +3671,7 @@ fn test_non_prepare_statement_should_infer_types() {
 
 #[test]
 #[should_panic(
-    expected = "value: SQL(ParserError(\"Expected [NOT] NULL or TRUE|FALSE or [NOT] DISTINCT FROM after IS, found: $1\""
+    expected = "value: SQL(ParserError(\"Expected: [NOT] NULL or TRUE|FALSE or [NOT] DISTINCT FROM after IS, found: $1\""
 )]
 fn test_prepare_statement_to_plan_panic_is_param() {
     let sql = "PREPARE my_plan(INT) AS SELECT id, age  FROM person WHERE age is $1";
@@ -4360,7 +4350,7 @@ fn test_parse_escaped_string_literal_value() {
     let sql = r"SELECT character_length(E'\000') AS len";
     assert_eq!(
         logical_plan(sql).unwrap_err().strip_backtrace(),
-        "SQL error: TokenizerError(\"Unterminated encoded string literal at Line: 1, Column 25\")"
+        "SQL error: TokenizerError(\"Unterminated encoded string literal at Line: 1, Column: 25\")"
     )
 }
 

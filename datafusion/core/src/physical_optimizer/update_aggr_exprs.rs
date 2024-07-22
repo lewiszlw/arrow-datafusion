@@ -20,14 +20,13 @@
 
 use std::sync::Arc;
 
-use super::PhysicalOptimizerRule;
-
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_common::{plan_datafusion_err, Result};
 use datafusion_physical_expr::{
     reverse_order_bys, AggregateExpr, EquivalenceProperties, PhysicalSortRequirement,
 };
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
 use datafusion_physical_plan::aggregates::concat_slices;
 use datafusion_physical_plan::windows::get_ordered_partition_by_indices;
 use datafusion_physical_plan::{
@@ -52,6 +51,7 @@ use datafusion_physical_plan::{
 pub struct OptimizeAggregateOrder {}
 
 impl OptimizeAggregateOrder {
+    #[allow(missing_docs)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -130,7 +130,7 @@ impl PhysicalOptimizerRule for OptimizeAggregateOrder {
 /// # Returns
 ///
 /// Returns `Ok(converted_aggr_exprs)` if the conversion process completes
-/// successfully. Any errors occuring during the conversion process are
+/// successfully. Any errors occurring during the conversion process are
 /// passed through.
 fn try_convert_aggregate_if_better(
     aggr_exprs: Vec<Arc<dyn AggregateExpr>>,

@@ -15,25 +15,44 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano};
 use async_recursion::async_recursion;
+use datafusion::arrow::array::GenericListArray;
 use datafusion::arrow::datatypes::{
     DataType, Field, FieldRef, Fields, IntervalUnit, Schema, TimeUnit,
 };
+use datafusion::common::plan_err;
 use datafusion::common::{
-    not_impl_err, substrait_datafusion_err, substrait_err, DFSchema, DFSchemaRef,
+    not_impl_err, plan_datafusion_err, substrait_datafusion_err, substrait_err, DFSchema,
+    DFSchemaRef,
 };
-use substrait::proto::expression::literal::IntervalDayToSecond;
-use substrait::proto::read_rel::local_files::file_or_files::PathType::UriFile;
-use url::Url;
-
-use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano};
 use datafusion::execution::FunctionRegistry;
+use datafusion::logical_expr::expr::{Exists, InSubquery, Sort};
+
 use datafusion::logical_expr::{
     aggregate_function, expr::find_df_window_func, Aggregate, BinaryExpr, Case,
-    EmptyRelation, Expr, ExprSchemable, LogicalPlan, Operator, Projection, ScalarUDF,
-    Values,
+    EmptyRelation, Expr, ExprSchemable, LogicalPlan, Operator, Projection, Values,
 };
+use substrait::proto::expression::subquery::set_predicate::PredicateOp;
+use url::Url;
 
+use crate::extensions::Extensions;
+use crate::variation_const::{
+    DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF,
+    DECIMAL_128_TYPE_VARIATION_REF, DECIMAL_256_TYPE_VARIATION_REF,
+    DEFAULT_CONTAINER_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
+    INTERVAL_MONTH_DAY_NANO_TYPE_NAME, LARGE_CONTAINER_TYPE_VARIATION_REF,
+    TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
+    TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
+    UNSIGNED_INTEGER_TYPE_VARIATION_REF,
+};
+#[allow(deprecated)]
+use crate::variation_const::{
+    INTERVAL_DAY_TIME_TYPE_REF, INTERVAL_MONTH_DAY_NANO_TYPE_REF,
+    INTERVAL_YEAR_MONTH_TYPE_REF,
+};
+use datafusion::common::scalar::ScalarStructBuilder;
+use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::{
     col, expr, Cast, Extension, GroupingSet, Like, LogicalPlanBuilder, Partitioning,
     Repartition, Subquery, WindowFrameBound, WindowFrameUnits, WindowFunctionDefinition,
@@ -41,15 +60,22 @@ use datafusion::logical_expr::{
 use datafusion::prelude::JoinType;
 use datafusion::sql::TableReference;
 use datafusion::{
-    error::{DataFusionError, Result},
+    error::Result,
     logical_expr::utils::split_conjunction,
     prelude::{Column, SessionContext},
     scalar::ScalarValue,
 };
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::sync::Arc;
 use substrait::proto::exchange_rel::ExchangeKind;
 use substrait::proto::expression::literal::user_defined::Val;
+use substrait::proto::expression::literal::{
+    IntervalDayToSecond, IntervalYearToMonth, UserDefined,
+};
 use substrait::proto::expression::subquery::SubqueryType;
 use substrait::proto::expression::{self, FieldReference, Literal, ScalarFunction};
+use substrait::proto::read_rel::local_files::file_or_files::PathType::UriFile;
 use substrait::proto::{
     aggregate_function::AggregationInvocation,
     expression::{
@@ -57,9 +83,8 @@ use substrait::proto::{
         reference_segment::ReferenceType::StructField,
         window_function::bound as SubstraitBound,
         window_function::bound::Kind as BoundKind, window_function::Bound,
-        MaskExpression, RexType,
+        window_function::BoundsType, MaskExpression, RexType,
     },
-    extensions::simple_extension_declaration::MappingType,
     function_argument::ArgType,
     join_rel, plan_rel, r#type,
     read_rel::ReadType,
@@ -70,84 +95,37 @@ use substrait::proto::{
 };
 use substrait::proto::{FunctionArgument, SortField};
 
-use datafusion::arrow::array::GenericListArray;
-use datafusion::common::plan_err;
-use datafusion::common::scalar::ScalarStructBuilder;
-use datafusion::logical_expr::expr::{InList, InSubquery, Sort};
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
-
-use crate::variation_const::{
-    DATE_32_TYPE_VARIATION_REF, DATE_64_TYPE_VARIATION_REF,
-    DECIMAL_128_TYPE_VARIATION_REF, DECIMAL_256_TYPE_VARIATION_REF,
-    DEFAULT_CONTAINER_TYPE_VARIATION_REF, DEFAULT_TYPE_VARIATION_REF,
-    INTERVAL_DAY_TIME_TYPE_REF, INTERVAL_MONTH_DAY_NANO_TYPE_REF,
-    INTERVAL_YEAR_MONTH_TYPE_REF, LARGE_CONTAINER_TYPE_VARIATION_REF,
-    TIMESTAMP_MICRO_TYPE_VARIATION_REF, TIMESTAMP_MILLI_TYPE_VARIATION_REF,
-    TIMESTAMP_NANO_TYPE_VARIATION_REF, TIMESTAMP_SECOND_TYPE_VARIATION_REF,
-    UNSIGNED_INTEGER_TYPE_VARIATION_REF,
-};
-
-enum ScalarFunctionType {
-    Op(Operator),
-    Expr(BuiltinExprBuilder),
-    Udf(Arc<ScalarUDF>),
-}
-
-pub fn name_to_op(name: &str) -> Result<Operator> {
+pub fn name_to_op(name: &str) -> Option<Operator> {
     match name {
-        "equal" => Ok(Operator::Eq),
-        "not_equal" => Ok(Operator::NotEq),
-        "lt" => Ok(Operator::Lt),
-        "lte" => Ok(Operator::LtEq),
-        "gt" => Ok(Operator::Gt),
-        "gte" => Ok(Operator::GtEq),
-        "add" => Ok(Operator::Plus),
-        "subtract" => Ok(Operator::Minus),
-        "multiply" => Ok(Operator::Multiply),
-        "divide" => Ok(Operator::Divide),
-        "mod" => Ok(Operator::Modulo),
-        "and" => Ok(Operator::And),
-        "or" => Ok(Operator::Or),
-        "is_distinct_from" => Ok(Operator::IsDistinctFrom),
-        "is_not_distinct_from" => Ok(Operator::IsNotDistinctFrom),
-        "regex_match" => Ok(Operator::RegexMatch),
-        "regex_imatch" => Ok(Operator::RegexIMatch),
-        "regex_not_match" => Ok(Operator::RegexNotMatch),
-        "regex_not_imatch" => Ok(Operator::RegexNotIMatch),
-        "bitwise_and" => Ok(Operator::BitwiseAnd),
-        "bitwise_or" => Ok(Operator::BitwiseOr),
-        "str_concat" => Ok(Operator::StringConcat),
-        "at_arrow" => Ok(Operator::AtArrow),
-        "arrow_at" => Ok(Operator::ArrowAt),
-        "bitwise_xor" => Ok(Operator::BitwiseXor),
-        "bitwise_shift_right" => Ok(Operator::BitwiseShiftRight),
-        "bitwise_shift_left" => Ok(Operator::BitwiseShiftLeft),
-        _ => not_impl_err!("Unsupported function name: {name:?}"),
+        "equal" => Some(Operator::Eq),
+        "not_equal" => Some(Operator::NotEq),
+        "lt" => Some(Operator::Lt),
+        "lte" => Some(Operator::LtEq),
+        "gt" => Some(Operator::Gt),
+        "gte" => Some(Operator::GtEq),
+        "add" => Some(Operator::Plus),
+        "subtract" => Some(Operator::Minus),
+        "multiply" => Some(Operator::Multiply),
+        "divide" => Some(Operator::Divide),
+        "mod" => Some(Operator::Modulo),
+        "and" => Some(Operator::And),
+        "or" => Some(Operator::Or),
+        "is_distinct_from" => Some(Operator::IsDistinctFrom),
+        "is_not_distinct_from" => Some(Operator::IsNotDistinctFrom),
+        "regex_match" => Some(Operator::RegexMatch),
+        "regex_imatch" => Some(Operator::RegexIMatch),
+        "regex_not_match" => Some(Operator::RegexNotMatch),
+        "regex_not_imatch" => Some(Operator::RegexNotIMatch),
+        "bitwise_and" => Some(Operator::BitwiseAnd),
+        "bitwise_or" => Some(Operator::BitwiseOr),
+        "str_concat" => Some(Operator::StringConcat),
+        "at_arrow" => Some(Operator::AtArrow),
+        "arrow_at" => Some(Operator::ArrowAt),
+        "bitwise_xor" => Some(Operator::BitwiseXor),
+        "bitwise_shift_right" => Some(Operator::BitwiseShiftRight),
+        "bitwise_shift_left" => Some(Operator::BitwiseShiftLeft),
+        _ => None,
     }
-}
-
-fn scalar_function_type_from_str(
-    ctx: &SessionContext,
-    name: &str,
-) -> Result<ScalarFunctionType> {
-    let s = ctx.state();
-    let name = substrait_fun_name(name);
-
-    if let Some(func) = s.scalar_functions().get(name) {
-        return Ok(ScalarFunctionType::Udf(func.to_owned()));
-    }
-
-    if let Ok(op) = name_to_op(name) {
-        return Ok(ScalarFunctionType::Op(op));
-    }
-
-    if let Some(builder) = BuiltinExprBuilder::try_from_name(name) {
-        return Ok(ScalarFunctionType::Expr(builder));
-    }
-
-    not_impl_err!("Unsupported function name: {name:?}")
 }
 
 pub fn substrait_fun_name(name: &str) -> &str {
@@ -213,19 +191,10 @@ pub async fn from_substrait_plan(
     plan: &Plan,
 ) -> Result<LogicalPlan> {
     // Register function extension
-    let function_extension = plan
-        .extensions
-        .iter()
-        .map(|e| match &e.mapping_type {
-            Some(ext) => match ext {
-                MappingType::ExtensionFunction(ext_f) => {
-                    Ok((ext_f.function_anchor, &ext_f.name))
-                }
-                _ => not_impl_err!("Extension type not supported: {ext:?}"),
-            },
-            None => not_impl_err!("Cannot parse empty extension"),
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
+    let extensions = Extensions::try_from(&plan.extensions)?;
+    if !extensions.type_variations.is_empty() {
+        return not_impl_err!("Type variation extensions are not supported");
+    }
 
     // Parse relations
     match plan.relations.len() {
@@ -233,10 +202,10 @@ pub async fn from_substrait_plan(
             match plan.relations[0].rel_type.as_ref() {
                 Some(rt) => match rt {
                     plan_rel::RelType::Rel(rel) => {
-                        Ok(from_substrait_rel(ctx, rel, &function_extension).await?)
+                        Ok(from_substrait_rel(ctx, rel, &extensions).await?)
                     },
                     plan_rel::RelType::Root(root) => {
-                        let plan = from_substrait_rel(ctx, root.input.as_ref().unwrap(), &function_extension).await?;
+                        let plan = from_substrait_rel(ctx, root.input.as_ref().unwrap(), &extensions).await?;
                         if root.names.is_empty() {
                             // Backwards compatibility for plans missing names
                             return Ok(plan);
@@ -424,7 +393,7 @@ fn make_renamed_schema(
 pub async fn from_substrait_rel(
     ctx: &SessionContext,
     rel: &Rel,
-    extensions: &HashMap<u32, &String>,
+    extensions: &Extensions,
 ) -> Result<LogicalPlan> {
     match &rel.rel_type {
         Some(RelType::Project(p)) => {
@@ -432,23 +401,34 @@ pub async fn from_substrait_rel(
                 let mut input = LogicalPlanBuilder::from(
                     from_substrait_rel(ctx, input, extensions).await?,
                 );
+                let mut names: HashSet<String> = HashSet::new();
                 let mut exprs: Vec<Expr> = vec![];
                 for e in &p.expressions {
                     let x =
                         from_substrait_rex(ctx, e, input.clone().schema(), extensions)
                             .await?;
                     // if the expression is WindowFunction, wrap in a Window relation
-                    //   before returning and do not add to list of this Projection's expression list
-                    // otherwise, add expression to the Projection's expression list
-                    match &*x {
-                        Expr::WindowFunction(_) => {
-                            input = input.window(vec![x.as_ref().clone()])?;
-                            exprs.push(x.as_ref().clone());
-                        }
-                        _ => {
-                            exprs.push(x.as_ref().clone());
-                        }
+                    if let Expr::WindowFunction(_) = &x {
+                        // Adding the same expression here and in the project below
+                        // works because the project's builder uses columnize_expr(..)
+                        // to transform it into a column reference
+                        input = input.window(vec![x.clone()])?
                     }
+                    // Ensure the expression has a unique display name, so that project's
+                    // validate_unique_names doesn't fail
+                    let name = x.display_name()?;
+                    let mut new_name = name.clone();
+                    let mut i = 0;
+                    while names.contains(&new_name) {
+                        new_name = format!("{}__temp__{}", name, i);
+                        i += 1;
+                    }
+                    if new_name != name {
+                        exprs.push(x.alias(new_name.clone()));
+                    } else {
+                        exprs.push(x);
+                    }
+                    names.insert(new_name);
                 }
                 input.project(exprs)?.build()
             } else {
@@ -464,7 +444,7 @@ pub async fn from_substrait_rel(
                     let expr =
                         from_substrait_rex(ctx, condition, input.schema(), extensions)
                             .await?;
-                    input.filter(expr.as_ref().clone())?.build()
+                    input.filter(expr)?.build()
                 } else {
                     not_impl_err!("Filter without an condition is not valid")
                 }
@@ -516,7 +496,7 @@ pub async fn from_substrait_rel(
                             let x =
                                 from_substrait_rex(ctx, e, input.schema(), extensions)
                                     .await?;
-                            group_expr.push(x.as_ref().clone());
+                            group_expr.push(x);
                         }
                     }
                     _ => {
@@ -531,7 +511,7 @@ pub async fn from_substrait_rel(
                                     extensions,
                                 )
                                 .await?;
-                                grouping_set.push(x.as_ref().clone());
+                                grouping_set.push(x);
                             }
                             grouping_sets.push(grouping_set);
                         }
@@ -549,9 +529,7 @@ pub async fn from_substrait_rel(
                     let filter = match &m.filter {
                         Some(fil) => Some(Box::new(
                             from_substrait_rex(ctx, fil, input.schema(), extensions)
-                                .await?
-                                .as_ref()
-                                .clone(),
+                                .await?,
                         )),
                         None => None,
                     };
@@ -679,7 +657,7 @@ pub async fn from_substrait_rel(
                     substrait_datafusion_err!("No base schema provided for Virtual Table")
                 })?;
 
-                let schema = from_substrait_named_struct(base_schema)?;
+                let schema = from_substrait_named_struct(base_schema, extensions)?;
 
                 if vt.values.is_empty() {
                     return Ok(LogicalPlan::EmptyRelation(EmptyRelation {
@@ -700,6 +678,7 @@ pub async fn from_substrait_rel(
                                 name_idx += 1; // top-level names are provided through schema
                                 Ok(Expr::Literal(from_substrait_literal(
                                     lit,
+                                    extensions,
                                     &base_schema.names,
                                     &mut name_idx,
                                 )?))
@@ -911,7 +890,7 @@ pub async fn from_substrait_sorts(
     ctx: &SessionContext,
     substrait_sorts: &Vec<SortField>,
     input_schema: &DFSchema,
-    extensions: &HashMap<u32, &String>,
+    extensions: &Extensions,
 ) -> Result<Vec<Expr>> {
     let mut sorts: Vec<Expr> = vec![];
     for s in substrait_sorts {
@@ -948,7 +927,7 @@ pub async fn from_substrait_sorts(
         };
         let (asc, nulls_first) = asc_nullfirst.unwrap();
         sorts.push(Expr::Sort(Sort {
-            expr: Box::new(expr.as_ref().clone()),
+            expr: Box::new(expr),
             asc,
             nulls_first,
         }));
@@ -961,22 +940,22 @@ pub async fn from_substrait_rex_vec(
     ctx: &SessionContext,
     exprs: &Vec<Expression>,
     input_schema: &DFSchema,
-    extensions: &HashMap<u32, &String>,
+    extensions: &Extensions,
 ) -> Result<Vec<Expr>> {
     let mut expressions: Vec<Expr> = vec![];
     for expr in exprs {
         let expression = from_substrait_rex(ctx, expr, input_schema, extensions).await?;
-        expressions.push(expression.as_ref().clone());
+        expressions.push(expression);
     }
     Ok(expressions)
 }
 
 /// Convert Substrait FunctionArguments to DataFusion Exprs
-pub async fn from_substriat_func_args(
+pub async fn from_substrait_func_args(
     ctx: &SessionContext,
     arguments: &Vec<FunctionArgument>,
     input_schema: &DFSchema,
-    extensions: &HashMap<u32, &String>,
+    extensions: &Extensions,
 ) -> Result<Vec<Expr>> {
     let mut args: Vec<Expr> = vec![];
     for arg in arguments {
@@ -984,11 +963,9 @@ pub async fn from_substriat_func_args(
             Some(ArgType::Value(e)) => {
                 from_substrait_rex(ctx, e, input_schema, extensions).await
             }
-            _ => {
-                not_impl_err!("Aggregated function argument non-Value type not supported")
-            }
+            _ => not_impl_err!("Function argument non-Value type not supported"),
         };
-        args.push(arg_expr?.as_ref().clone());
+        args.push(arg_expr?);
     }
     Ok(args)
 }
@@ -998,38 +975,30 @@ pub async fn from_substrait_agg_func(
     ctx: &SessionContext,
     f: &AggregateFunction,
     input_schema: &DFSchema,
-    extensions: &HashMap<u32, &String>,
+    extensions: &Extensions,
     filter: Option<Box<Expr>>,
     order_by: Option<Vec<Expr>>,
     distinct: bool,
 ) -> Result<Arc<Expr>> {
-    let mut args: Vec<Expr> = vec![];
-    for arg in &f.arguments {
-        let arg_expr = match &arg.arg_type {
-            Some(ArgType::Value(e)) => {
-                from_substrait_rex(ctx, e, input_schema, extensions).await
-            }
-            _ => {
-                not_impl_err!("Aggregated function argument non-Value type not supported")
-            }
-        };
-        args.push(arg_expr?.as_ref().clone());
-    }
+    let args =
+        from_substrait_func_args(ctx, &f.arguments, input_schema, extensions).await?;
 
-    let Some(function_name) = extensions.get(&f.function_reference) else {
+    let Some(function_name) = extensions.functions.get(&f.function_reference) else {
         return plan_err!(
             "Aggregate function not registered: function anchor = {:?}",
             f.function_reference
         );
     };
-    // function_name.split(':').next().unwrap_or(function_name);
-    let function_name = substrait_fun_name((**function_name).as_str());
+
+    let function_name = substrait_fun_name(function_name);
     // try udaf first, then built-in aggr fn.
     if let Ok(fun) = ctx.udaf(function_name) {
         // deal with situation that count(*) got no arguments
-        if fun.name() == "count" && args.is_empty() {
-            args.push(Expr::Literal(ScalarValue::Int64(Some(1))));
-        }
+        let args = if fun.name() == "count" && args.is_empty() {
+            vec![Expr::Literal(ScalarValue::Int64(Some(1)))]
+        } else {
+            args
+        };
 
         Ok(Arc::new(Expr::AggregateFunction(
             expr::AggregateFunction::new_udf(fun, args, distinct, filter, order_by, None),
@@ -1041,7 +1010,7 @@ pub async fn from_substrait_agg_func(
         )))
     } else {
         not_impl_err!(
-            "Aggregated function {} is not supported: function anchor = {:?}",
+            "Aggregate function {} is not supported: function anchor = {:?}",
             function_name,
             f.function_reference
         )
@@ -1054,18 +1023,16 @@ pub async fn from_substrait_rex(
     ctx: &SessionContext,
     e: &Expression,
     input_schema: &DFSchema,
-    extensions: &HashMap<u32, &String>,
-) -> Result<Arc<Expr>> {
+    extensions: &Extensions,
+) -> Result<Expr> {
     match &e.rex_type {
         Some(RexType::SingularOrList(s)) => {
             let substrait_expr = s.value.as_ref().unwrap();
             let substrait_list = s.options.as_ref();
-            Ok(Arc::new(Expr::InList(InList {
+            Ok(Expr::InList(InList {
                 expr: Box::new(
                     from_substrait_rex(ctx, substrait_expr, input_schema, extensions)
-                        .await?
-                        .as_ref()
-                        .clone(),
+                        .await?,
                 ),
                 list: from_substrait_rex_vec(
                     ctx,
@@ -1075,11 +1042,11 @@ pub async fn from_substrait_rex(
                 )
                 .await?,
                 negated: false,
-            })))
+            }))
         }
-        Some(RexType::Selection(field_ref)) => Ok(Arc::new(
-            from_substrait_field_reference(field_ref, input_schema)?,
-        )),
+        Some(RexType::Selection(field_ref)) => {
+            Ok(from_substrait_field_reference(field_ref, input_schema)?)
+        }
         Some(RexType::IfThen(if_then)) => {
             // Parse `ifs`
             // If the first element does not have a `then` part, then we can assume it's a base expression
@@ -1096,9 +1063,7 @@ pub async fn from_substrait_rex(
                                 input_schema,
                                 extensions,
                             )
-                            .await?
-                            .as_ref()
-                            .clone(),
+                            .await?,
                         ));
                         continue;
                     }
@@ -1111,9 +1076,7 @@ pub async fn from_substrait_rex(
                             input_schema,
                             extensions,
                         )
-                        .await?
-                        .as_ref()
-                        .clone(),
+                        .await?,
                     ),
                     Box::new(
                         from_substrait_rex(
@@ -1122,115 +1085,79 @@ pub async fn from_substrait_rex(
                             input_schema,
                             extensions,
                         )
-                        .await?
-                        .as_ref()
-                        .clone(),
+                        .await?,
                     ),
                 ));
             }
             // Parse `else`
             let else_expr = match &if_then.r#else {
                 Some(e) => Some(Box::new(
-                    from_substrait_rex(ctx, e, input_schema, extensions)
-                        .await?
-                        .as_ref()
-                        .clone(),
+                    from_substrait_rex(ctx, e, input_schema, extensions).await?,
                 )),
                 None => None,
             };
-            Ok(Arc::new(Expr::Case(Case {
+            Ok(Expr::Case(Case {
                 expr,
                 when_then_expr,
                 else_expr,
-            })))
+            }))
         }
         Some(RexType::ScalarFunction(f)) => {
-            let fn_name = extensions.get(&f.function_reference).ok_or_else(|| {
-                DataFusionError::NotImplemented(format!(
-                    "Aggregated function not found: function reference = {:?}",
+            let Some(fn_name) = extensions.functions.get(&f.function_reference) else {
+                return plan_err!(
+                    "Scalar function not found: function reference = {:?}",
                     f.function_reference
-                ))
-            })?;
+                );
+            };
+            let fn_name = substrait_fun_name(fn_name);
 
-            // Convert function arguments from Substrait to DataFusion
-            async fn decode_arguments(
-                ctx: &SessionContext,
-                input_schema: &DFSchema,
-                extensions: &HashMap<u32, &String>,
-                function_args: &[FunctionArgument],
-            ) -> Result<Vec<Expr>> {
-                let mut args = Vec::with_capacity(function_args.len());
-                for arg in function_args {
-                    let arg_expr = match &arg.arg_type {
-                        Some(ArgType::Value(e)) => {
-                            from_substrait_rex(ctx, e, input_schema, extensions).await
-                        }
-                        _ => not_impl_err!(
-                            "Aggregated function argument non-Value type not supported"
-                        ),
-                    }?;
-                    args.push(arg_expr.as_ref().clone());
-                }
-                Ok(args)
-            }
-
-            let fn_type = scalar_function_type_from_str(ctx, fn_name)?;
-            match fn_type {
-                ScalarFunctionType::Udf(fun) => {
-                    let args = decode_arguments(
-                        ctx,
-                        input_schema,
-                        extensions,
-                        f.arguments.as_slice(),
-                    )
+            let args =
+                from_substrait_func_args(ctx, &f.arguments, input_schema, extensions)
                     .await?;
-                    Ok(Arc::new(Expr::ScalarFunction(
-                        expr::ScalarFunction::new_udf(fun, args),
-                    )))
-                }
-                ScalarFunctionType::Op(op) => {
-                    if f.arguments.len() != 2 {
-                        return not_impl_err!(
-                            "Expect two arguments for binary operator {op:?}"
-                        );
-                    }
-                    let lhs = &f.arguments[0].arg_type;
-                    let rhs = &f.arguments[1].arg_type;
 
-                    match (lhs, rhs) {
-                        (Some(ArgType::Value(l)), Some(ArgType::Value(r))) => {
-                            Ok(Arc::new(Expr::BinaryExpr(BinaryExpr {
-                                left: Box::new(
-                                    from_substrait_rex(ctx, l, input_schema, extensions)
-                                        .await?
-                                        .as_ref()
-                                        .clone(),
-                                ),
+            // try to first match the requested function into registered udfs, then built-in ops
+            // and finally built-in expressions
+            if let Some(func) = ctx.state().scalar_functions().get(fn_name) {
+                Ok(Expr::ScalarFunction(expr::ScalarFunction::new_udf(
+                    func.to_owned(),
+                    args,
+                )))
+            } else if let Some(op) = name_to_op(fn_name) {
+                if f.arguments.len() < 2 {
+                    return not_impl_err!(
+                        "Expect at least two arguments for binary operator {op:?}, the provided number of operators is {:?}",
+                        f.arguments.len()
+                    );
+                }
+                // Some expressions are binary in DataFusion but take in a variadic number of args in Substrait.
+                // In those cases we iterate through all the arguments, applying the binary expression against them all
+                let combined_expr = args
+                    .into_iter()
+                    .fold(None, |combined_expr: Option<Expr>, arg: Expr| {
+                        Some(match combined_expr {
+                            Some(expr) => Expr::BinaryExpr(BinaryExpr {
+                                left: Box::new(expr),
                                 op,
-                                right: Box::new(
-                                    from_substrait_rex(ctx, r, input_schema, extensions)
-                                        .await?
-                                        .as_ref()
-                                        .clone(),
-                                ),
-                            })))
-                        }
-                        (l, r) => not_impl_err!(
-                            "Invalid arguments for binary expression: {l:?} and {r:?}"
-                        ),
-                    }
-                }
-                ScalarFunctionType::Expr(builder) => {
-                    builder.build(ctx, f, input_schema, extensions).await
-                }
+                                right: Box::new(arg),
+                            }),
+                            None => arg,
+                        })
+                    })
+                    .unwrap();
+
+                Ok(combined_expr)
+            } else if let Some(builder) = BuiltinExprBuilder::try_from_name(fn_name) {
+                builder.build(ctx, f, input_schema, extensions).await
+            } else {
+                not_impl_err!("Unsupported function name: {fn_name:?}")
             }
         }
         Some(RexType::Literal(lit)) => {
-            let scalar_value = from_substrait_literal_without_names(lit)?;
-            Ok(Arc::new(Expr::Literal(scalar_value)))
+            let scalar_value = from_substrait_literal_without_names(lit, extensions)?;
+            Ok(Expr::Literal(scalar_value))
         }
         Some(RexType::Cast(cast)) => match cast.as_ref().r#type.as_ref() {
-            Some(output_type) => Ok(Arc::new(Expr::Cast(Cast::new(
+            Some(output_type) => Ok(Expr::Cast(Cast::new(
                 Box::new(
                     from_substrait_rex(
                         ctx,
@@ -1238,45 +1165,61 @@ pub async fn from_substrait_rex(
                         input_schema,
                         extensions,
                     )
-                    .await?
-                    .as_ref()
-                    .clone(),
+                    .await?,
                 ),
-                from_substrait_type_without_names(output_type)?,
-            )))),
+                from_substrait_type_without_names(output_type, extensions)?,
+            ))),
             None => substrait_err!("Cast expression without output type is not allowed"),
         },
         Some(RexType::WindowFunction(window)) => {
-            let fun = match extensions.get(&window.function_reference) {
-                Some(function_name) => {
-                    // check udaf
-                    match ctx.udaf(function_name) {
-                        Ok(udaf) => {
-                            Ok(Some(WindowFunctionDefinition::AggregateUDF(udaf)))
-                        }
-                        Err(_) => Ok(find_df_window_func(function_name)),
-                    }
-                }
-                None => not_impl_err!(
-                    "Window function not found: function anchor = {:?}",
-                    &window.function_reference
-                ),
+            let Some(fn_name) = extensions.functions.get(&window.function_reference)
+            else {
+                return plan_err!(
+                    "Window function not found: function reference = {:?}",
+                    window.function_reference
+                );
             };
+            let fn_name = substrait_fun_name(fn_name);
+
+            // check udwf first, then udaf, then built-in window and aggregate functions
+            let fun = if let Ok(udwf) = ctx.udwf(fn_name) {
+                Ok(WindowFunctionDefinition::WindowUDF(udwf))
+            } else if let Ok(udaf) = ctx.udaf(fn_name) {
+                Ok(WindowFunctionDefinition::AggregateUDF(udaf))
+            } else if let Some(fun) = find_df_window_func(fn_name) {
+                Ok(fun)
+            } else {
+                not_impl_err!(
+                    "Window function {} is not supported: function anchor = {:?}",
+                    fn_name,
+                    window.function_reference
+                )
+            }?;
+
             let order_by =
                 from_substrait_sorts(ctx, &window.sorts, input_schema, extensions)
                     .await?;
-            // Substrait does not encode WindowFrameUnits so we're using a simple logic to determine the units
-            // If there is no `ORDER BY`, then by default, the frame counts each row from the lower up to upper boundary
-            // If there is `ORDER BY`, then by default, each frame is a range starting from unbounded preceding to current row
-            // TODO: Consider the cases where window frame is specified in query and is different from default
-            let units = if order_by.is_empty() {
-                WindowFrameUnits::Rows
-            } else {
-                WindowFrameUnits::Range
-            };
-            Ok(Arc::new(Expr::WindowFunction(expr::WindowFunction {
-                fun: fun?.unwrap(),
-                args: from_substriat_func_args(
+
+            let bound_units =
+                match BoundsType::try_from(window.bounds_type).map_err(|e| {
+                    plan_datafusion_err!("Invalid bound type {}: {e}", window.bounds_type)
+                })? {
+                    BoundsType::Rows => WindowFrameUnits::Rows,
+                    BoundsType::Range => WindowFrameUnits::Range,
+                    BoundsType::Unspecified => {
+                        // If the plan does not specify the bounds type, then we use a simple logic to determine the units
+                        // If there is no `ORDER BY`, then by default, the frame counts each row from the lower up to upper boundary
+                        // If there is `ORDER BY`, then by default, each frame is a range starting from unbounded preceding to current row
+                        if order_by.is_empty() {
+                            WindowFrameUnits::Rows
+                        } else {
+                            WindowFrameUnits::Range
+                        }
+                    }
+                };
+            Ok(Expr::WindowFunction(expr::WindowFunction {
+                fun,
+                args: from_substrait_func_args(
                     ctx,
                     &window.arguments,
                     input_schema,
@@ -1292,21 +1235,18 @@ pub async fn from_substrait_rex(
                 .await?,
                 order_by,
                 window_frame: datafusion::logical_expr::WindowFrame::new_bounds(
-                    units,
+                    bound_units,
                     from_substrait_bound(&window.lower_bound, true)?,
                     from_substrait_bound(&window.upper_bound, false)?,
                 ),
                 null_treatment: None,
-            })))
+            }))
         }
         Some(RexType::Subquery(subquery)) => match &subquery.as_ref().subquery_type {
             Some(subquery_type) => match subquery_type {
                 SubqueryType::InPredicate(in_predicate) => {
                     if in_predicate.needles.len() != 1 {
-                        Err(DataFusionError::Substrait(
-                            "InPredicate Subquery type must have exactly one Needle expression"
-                                .to_string(),
-                        ))
+                        substrait_err!("InPredicate Subquery type must have exactly one Needle expression")
                     } else {
                         let needle_expr = &in_predicate.needles[0];
                         let haystack_expr = &in_predicate.haystack;
@@ -1315,7 +1255,7 @@ pub async fn from_substrait_rex(
                                 from_substrait_rel(ctx, haystack_expr, extensions)
                                     .await?;
                             let outer_refs = haystack_expr.all_out_ref_exprs();
-                            Ok(Arc::new(Expr::InSubquery(InSubquery {
+                            Ok(Expr::InSubquery(InSubquery {
                                 expr: Box::new(
                                     from_substrait_rex(
                                         ctx,
@@ -1323,37 +1263,80 @@ pub async fn from_substrait_rex(
                                         input_schema,
                                         extensions,
                                     )
-                                    .await?
-                                    .as_ref()
-                                    .clone(),
+                                    .await?,
                                 ),
                                 subquery: Subquery {
                                     subquery: Arc::new(haystack_expr),
                                     outer_ref_columns: outer_refs,
                                 },
                                 negated: false,
-                            })))
+                            }))
                         } else {
                             substrait_err!("InPredicate Subquery type must have a Haystack expression")
                         }
                     }
                 }
-                _ => substrait_err!("Subquery type not implemented"),
+                SubqueryType::Scalar(query) => {
+                    let plan = from_substrait_rel(
+                        ctx,
+                        &(query.input.clone()).unwrap_or_default(),
+                        extensions,
+                    )
+                    .await?;
+                    let outer_ref_columns = plan.all_out_ref_exprs();
+                    Ok(Expr::ScalarSubquery(Subquery {
+                        subquery: Arc::new(plan),
+                        outer_ref_columns,
+                    }))
+                }
+                SubqueryType::SetPredicate(predicate) => {
+                    match predicate.predicate_op() {
+                        // exist
+                        PredicateOp::Exists => {
+                            let relation = &predicate.tuples;
+                            let plan = from_substrait_rel(
+                                ctx,
+                                &relation.clone().unwrap_or_default(),
+                                extensions,
+                            )
+                            .await?;
+                            let outer_ref_columns = plan.all_out_ref_exprs();
+                            Ok(Expr::Exists(Exists::new(
+                                Subquery {
+                                    subquery: Arc::new(plan),
+                                    outer_ref_columns,
+                                },
+                                false,
+                            )))
+                        }
+                        other_type => substrait_err!(
+                            "unimplemented type {:?} for set predicate",
+                            other_type
+                        ),
+                    }
+                }
+                other_type => {
+                    substrait_err!("Subquery type {:?} not implemented", other_type)
+                }
             },
             None => {
-                substrait_err!("Subquery experssion without SubqueryType is not allowed")
+                substrait_err!("Subquery expression without SubqueryType is not allowed")
             }
         },
         _ => not_impl_err!("unsupported rex_type"),
     }
 }
 
-pub(crate) fn from_substrait_type_without_names(dt: &Type) -> Result<DataType> {
-    from_substrait_type(dt, &[], &mut 0)
+pub(crate) fn from_substrait_type_without_names(
+    dt: &Type,
+    extensions: &Extensions,
+) -> Result<DataType> {
+    from_substrait_type(dt, extensions, &[], &mut 0)
 }
 
 fn from_substrait_type(
     dt: &Type,
+    extensions: &Extensions,
     dfs_names: &[String],
     name_idx: &mut usize,
 ) -> Result<DataType> {
@@ -1436,8 +1419,8 @@ fn from_substrait_type(
                     substrait_datafusion_err!("List type must have inner type")
                 })?;
                 let field = Arc::new(Field::new_list_field(
-                    from_substrait_type(inner_type, dfs_names, name_idx)?,
-                    // We ignore Substrait's nullability here to match to_substrait_literal 
+                    from_substrait_type(inner_type, extensions, dfs_names, name_idx)?,
+                    // We ignore Substrait's nullability here to match to_substrait_literal
                     // which always creates nullable lists
                     true,
                 ));
@@ -1458,22 +1441,25 @@ fn from_substrait_type(
                 })?;
                 let key_field = Arc::new(Field::new(
                     "key",
-                    from_substrait_type(key_type, dfs_names, name_idx)?,
+                    from_substrait_type(key_type, extensions, dfs_names, name_idx)?,
                     false,
                 ));
                 let value_field = Arc::new(Field::new(
                     "value",
-                    from_substrait_type(value_type, dfs_names, name_idx)?,
+                    from_substrait_type(value_type, extensions, dfs_names, name_idx)?,
                     true,
                 ));
                 match map.type_variation_reference {
                     DEFAULT_CONTAINER_TYPE_VARIATION_REF => {
-                        Ok(DataType::Map(Arc::new(Field::new_struct(
-                            "entries",
-                            [key_field, value_field],
-                            false, // The inner map field is always non-nullable (Arrow #1697),
-                        )), false))
-                    },
+                        Ok(DataType::Map(
+                            Arc::new(Field::new_struct(
+                                "entries",
+                                [key_field, value_field],
+                                false, // The inner map field is always non-nullable (Arrow #1697),
+                            )),
+                            false,
+                        ))
+                    }
                     v => not_impl_err!(
                         "Unsupported Substrait type variation {v} of type {s_kind:?}"
                     )?,
@@ -1490,26 +1476,58 @@ fn from_substrait_type(
                     "Unsupported Substrait type variation {v} of type {s_kind:?}"
                 ),
             },
+            r#type::Kind::IntervalYear(i) => match i.type_variation_reference {
+                DEFAULT_TYPE_VARIATION_REF => {
+                    Ok(DataType::Interval(IntervalUnit::YearMonth))
+                }
+                v => not_impl_err!(
+                    "Unsupported Substrait type variation {v} of type {s_kind:?}"
+                ),
+            },
+            r#type::Kind::IntervalDay(i) => match i.type_variation_reference {
+                DEFAULT_TYPE_VARIATION_REF => {
+                    Ok(DataType::Interval(IntervalUnit::DayTime))
+                }
+                v => not_impl_err!(
+                    "Unsupported Substrait type variation {v} of type {s_kind:?}"
+                ),
+            },
             r#type::Kind::UserDefined(u) => {
-                match u.type_reference {
-                    INTERVAL_YEAR_MONTH_TYPE_REF => {
-                        Ok(DataType::Interval(IntervalUnit::YearMonth))
+                if let Some(name) = extensions.types.get(&u.type_reference) {
+                    match name.as_ref() {
+                        INTERVAL_MONTH_DAY_NANO_TYPE_NAME => Ok(DataType::Interval(IntervalUnit::MonthDayNano)),
+                            _ => not_impl_err!(
+                                "Unsupported Substrait user defined type with ref {} and variation {}",
+                                u.type_reference,
+                                u.type_variation_reference
+                            ),
                     }
-                    INTERVAL_DAY_TIME_TYPE_REF => {
-                        Ok(DataType::Interval(IntervalUnit::DayTime))
-                    }
-                    INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
-                        Ok(DataType::Interval(IntervalUnit::MonthDayNano))
-                    }
-                    _ => not_impl_err!(
+                } else {
+                    // Kept for backwards compatibility, new plans should include the extension instead
+                    #[allow(deprecated)]
+                    match u.type_reference {
+                        // Kept for backwards compatibility, use IntervalYear instead
+                        INTERVAL_YEAR_MONTH_TYPE_REF => {
+                            Ok(DataType::Interval(IntervalUnit::YearMonth))
+                        }
+                        // Kept for backwards compatibility, use IntervalDay instead
+                        INTERVAL_DAY_TIME_TYPE_REF => {
+                            Ok(DataType::Interval(IntervalUnit::DayTime))
+                        }
+                        // Not supported yet by Substrait
+                        INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
+                            Ok(DataType::Interval(IntervalUnit::MonthDayNano))
+                        }
+                        _ => not_impl_err!(
                         "Unsupported Substrait user defined type with ref {} and variation {}",
                         u.type_reference,
                         u.type_variation_reference
                     ),
+                    }
                 }
-            },
+            }
             r#type::Kind::Struct(s) => Ok(DataType::Struct(from_substrait_struct_type(
-                s, dfs_names, name_idx,
+                s, extensions, dfs_names, name_idx,
             )?)),
             r#type::Kind::Varchar(_) => Ok(DataType::Utf8),
             r#type::Kind::FixedChar(_) => Ok(DataType::Utf8),
@@ -1521,6 +1539,7 @@ fn from_substrait_type(
 
 fn from_substrait_struct_type(
     s: &r#type::Struct,
+    extensions: &Extensions,
     dfs_names: &[String],
     name_idx: &mut usize,
 ) -> Result<Fields> {
@@ -1528,8 +1547,8 @@ fn from_substrait_struct_type(
     for (i, f) in s.types.iter().enumerate() {
         let field = Field::new(
             next_struct_field_name(i, dfs_names, name_idx)?,
-            from_substrait_type(f, dfs_names, name_idx)?,
-            is_substrait_type_nullable(f)?,
+            from_substrait_type(f, extensions, dfs_names, name_idx)?,
+            true, // We assume everything to be nullable since that's easier than ensuring it matches
         );
         fields.push(field);
     }
@@ -1554,12 +1573,16 @@ fn next_struct_field_name(
     }
 }
 
-fn from_substrait_named_struct(base_schema: &NamedStruct) -> Result<DFSchemaRef> {
+fn from_substrait_named_struct(
+    base_schema: &NamedStruct,
+    extensions: &Extensions,
+) -> Result<DFSchemaRef> {
     let mut name_idx = 0;
     let fields = from_substrait_struct_type(
         base_schema.r#struct.as_ref().ok_or_else(|| {
             substrait_datafusion_err!("Named struct must contain a struct")
         })?,
+        extensions,
         &base_schema.names,
         &mut name_idx,
     );
@@ -1573,47 +1596,6 @@ fn from_substrait_named_struct(base_schema: &NamedStruct) -> Result<DFSchemaRef>
     Ok(DFSchemaRef::new(DFSchema::try_from(Schema::new(fields?))?))
 }
 
-fn is_substrait_type_nullable(dtype: &Type) -> Result<bool> {
-    fn is_nullable(nullability: i32) -> bool {
-        nullability != substrait::proto::r#type::Nullability::Required as i32
-    }
-
-    let nullable = match dtype
-        .kind
-        .as_ref()
-        .ok_or_else(|| substrait_datafusion_err!("Type must contain Kind"))?
-    {
-        r#type::Kind::Bool(val) => is_nullable(val.nullability),
-        r#type::Kind::I8(val) => is_nullable(val.nullability),
-        r#type::Kind::I16(val) => is_nullable(val.nullability),
-        r#type::Kind::I32(val) => is_nullable(val.nullability),
-        r#type::Kind::I64(val) => is_nullable(val.nullability),
-        r#type::Kind::Fp32(val) => is_nullable(val.nullability),
-        r#type::Kind::Fp64(val) => is_nullable(val.nullability),
-        r#type::Kind::String(val) => is_nullable(val.nullability),
-        r#type::Kind::Binary(val) => is_nullable(val.nullability),
-        r#type::Kind::Timestamp(val) => is_nullable(val.nullability),
-        r#type::Kind::Date(val) => is_nullable(val.nullability),
-        r#type::Kind::Time(val) => is_nullable(val.nullability),
-        r#type::Kind::IntervalYear(val) => is_nullable(val.nullability),
-        r#type::Kind::IntervalDay(val) => is_nullable(val.nullability),
-        r#type::Kind::TimestampTz(val) => is_nullable(val.nullability),
-        r#type::Kind::Uuid(val) => is_nullable(val.nullability),
-        r#type::Kind::FixedChar(val) => is_nullable(val.nullability),
-        r#type::Kind::Varchar(val) => is_nullable(val.nullability),
-        r#type::Kind::FixedBinary(val) => is_nullable(val.nullability),
-        r#type::Kind::Decimal(val) => is_nullable(val.nullability),
-        r#type::Kind::PrecisionTimestamp(val) => is_nullable(val.nullability),
-        r#type::Kind::PrecisionTimestampTz(val) => is_nullable(val.nullability),
-        r#type::Kind::Struct(val) => is_nullable(val.nullability),
-        r#type::Kind::List(val) => is_nullable(val.nullability),
-        r#type::Kind::Map(val) => is_nullable(val.nullability),
-        r#type::Kind::UserDefined(val) => is_nullable(val.nullability),
-        r#type::Kind::UserDefinedTypeReference(_) => true, // not implemented, assume nullable
-    };
-    Ok(nullable)
-}
-
 fn from_substrait_bound(
     bound: &Option<Bound>,
     is_lower: bool,
@@ -1624,12 +1606,22 @@ fn from_substrait_bound(
                 BoundKind::CurrentRow(SubstraitBound::CurrentRow {}) => {
                     Ok(WindowFrameBound::CurrentRow)
                 }
-                BoundKind::Preceding(SubstraitBound::Preceding { offset }) => Ok(
-                    WindowFrameBound::Preceding(ScalarValue::Int64(Some(*offset))),
-                ),
-                BoundKind::Following(SubstraitBound::Following { offset }) => Ok(
-                    WindowFrameBound::Following(ScalarValue::Int64(Some(*offset))),
-                ),
+                BoundKind::Preceding(SubstraitBound::Preceding { offset }) => {
+                    if *offset <= 0 {
+                        return plan_err!("Preceding bound must be positive");
+                    }
+                    Ok(WindowFrameBound::Preceding(ScalarValue::UInt64(Some(
+                        *offset as u64,
+                    ))))
+                }
+                BoundKind::Following(SubstraitBound::Following { offset }) => {
+                    if *offset <= 0 {
+                        return plan_err!("Following bound must be positive");
+                    }
+                    Ok(WindowFrameBound::Following(ScalarValue::UInt64(Some(
+                        *offset as u64,
+                    ))))
+                }
                 BoundKind::Unbounded(SubstraitBound::Unbounded {}) => {
                     if is_lower {
                         Ok(WindowFrameBound::Preceding(ScalarValue::Null))
@@ -1650,12 +1642,16 @@ fn from_substrait_bound(
     }
 }
 
-pub(crate) fn from_substrait_literal_without_names(lit: &Literal) -> Result<ScalarValue> {
-    from_substrait_literal(lit, &vec![], &mut 0)
+pub(crate) fn from_substrait_literal_without_names(
+    lit: &Literal,
+    extensions: &Extensions,
+) -> Result<ScalarValue> {
+    from_substrait_literal(lit, extensions, &vec![], &mut 0)
 }
 
 fn from_substrait_literal(
     lit: &Literal,
+    extensions: &Extensions,
     dfs_names: &Vec<String>,
     name_idx: &mut usize,
 ) -> Result<ScalarValue> {
@@ -1750,7 +1746,7 @@ fn from_substrait_literal(
             let elements = l
                 .values
                 .iter()
-                .map(|el| from_substrait_literal(el, dfs_names, name_idx))
+                .map(|el| from_substrait_literal(el, extensions, dfs_names, name_idx))
                 .collect::<Result<Vec<_>>>()?;
             if elements.is_empty() {
                 return substrait_err!(
@@ -1773,6 +1769,7 @@ fn from_substrait_literal(
         Some(LiteralType::EmptyList(l)) => {
             let element_type = from_substrait_type(
                 l.r#type.clone().unwrap().as_ref(),
+                extensions,
                 dfs_names,
                 name_idx,
             )?;
@@ -1792,55 +1789,32 @@ fn from_substrait_literal(
             let mut builder = ScalarStructBuilder::new();
             for (i, field) in s.fields.iter().enumerate() {
                 let name = next_struct_field_name(i, dfs_names, name_idx)?;
-                let sv = from_substrait_literal(field, dfs_names, name_idx)?;
-                builder = builder
-                    .with_scalar(Field::new(name, sv.data_type(), field.nullable), sv);
+                let sv = from_substrait_literal(field, extensions, dfs_names, name_idx)?;
+                // We assume everything to be nullable, since Arrow's strict about things matching
+                // and it's hard to match otherwise.
+                builder = builder.with_scalar(Field::new(name, sv.data_type(), true), sv);
             }
             builder.build()?
         }
         Some(LiteralType::Null(ntype)) => {
-            from_substrait_null(ntype, dfs_names, name_idx)?
+            from_substrait_null(ntype, extensions, dfs_names, name_idx)?
         }
         Some(LiteralType::IntervalDayToSecond(IntervalDayToSecond {
             days,
             seconds,
             microseconds,
         })) => {
+            // DF only supports millisecond precision, so we lose the micros here
             ScalarValue::new_interval_dt(*days, (seconds * 1000) + (microseconds / 1000))
         }
+        Some(LiteralType::IntervalYearToMonth(IntervalYearToMonth { years, months })) => {
+            ScalarValue::new_interval_ym(*years, *months)
+        }
+        Some(LiteralType::FixedChar(c)) => ScalarValue::Utf8(Some(c.clone())),
         Some(LiteralType::UserDefined(user_defined)) => {
-            match user_defined.type_reference {
-                INTERVAL_YEAR_MONTH_TYPE_REF => {
-                    let Some(Val::Value(raw_val)) = user_defined.val.as_ref() else {
-                        return substrait_err!("Interval year month value is empty");
-                    };
-                    let value_slice: [u8; 4] =
-                        (*raw_val.value).try_into().map_err(|_| {
-                            substrait_datafusion_err!(
-                                "Failed to parse interval year month value"
-                            )
-                        })?;
-                    ScalarValue::IntervalYearMonth(Some(i32::from_le_bytes(value_slice)))
-                }
-                INTERVAL_DAY_TIME_TYPE_REF => {
-                    let Some(Val::Value(raw_val)) = user_defined.val.as_ref() else {
-                        return substrait_err!("Interval day time value is empty");
-                    };
-                    let value_slice: [u8; 8] =
-                        (*raw_val.value).try_into().map_err(|_| {
-                            substrait_datafusion_err!(
-                                "Failed to parse interval day time value"
-                            )
-                        })?;
-                    let days = i32::from_le_bytes(value_slice[0..4].try_into().unwrap());
-                    let milliseconds =
-                        i32::from_le_bytes(value_slice[4..8].try_into().unwrap());
-                    ScalarValue::IntervalDayTime(Some(IntervalDayTime {
-                        days,
-                        milliseconds,
-                    }))
-                }
-                INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
+            // Helper function to prevent duplicating this code - can be inlined once the non-extension path is removed
+            let interval_month_day_nano =
+                |user_defined: &UserDefined| -> Result<ScalarValue> {
                     let Some(Val::Value(raw_val)) = user_defined.val.as_ref() else {
                         return substrait_err!("Interval month day nano value is empty");
                     };
@@ -1855,17 +1829,76 @@ fn from_substrait_literal(
                     let days = i32::from_le_bytes(value_slice[4..8].try_into().unwrap());
                     let nanoseconds =
                         i64::from_le_bytes(value_slice[8..16].try_into().unwrap());
-                    ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano {
-                        months,
-                        days,
-                        nanoseconds,
-                    }))
-                }
-                _ => {
-                    return not_impl_err!(
-                        "Unsupported Substrait user defined type with ref {}",
-                        user_defined.type_reference
+                    Ok(ScalarValue::IntervalMonthDayNano(Some(
+                        IntervalMonthDayNano {
+                            months,
+                            days,
+                            nanoseconds,
+                        },
+                    )))
+                };
+
+            if let Some(name) = extensions.types.get(&user_defined.type_reference) {
+                match name.as_ref() {
+                    INTERVAL_MONTH_DAY_NANO_TYPE_NAME => {
+                        interval_month_day_nano(user_defined)?
+                    }
+                    _ => {
+                        return not_impl_err!(
+                        "Unsupported Substrait user defined type with ref {} and name {}",
+                        user_defined.type_reference,
+                        name
                     )
+                    }
+                }
+            } else {
+                // Kept for backwards compatibility - new plans should include extension instead
+                #[allow(deprecated)]
+                match user_defined.type_reference {
+                    // Kept for backwards compatibility, use IntervalYearToMonth instead
+                    INTERVAL_YEAR_MONTH_TYPE_REF => {
+                        let Some(Val::Value(raw_val)) = user_defined.val.as_ref() else {
+                            return substrait_err!("Interval year month value is empty");
+                        };
+                        let value_slice: [u8; 4] =
+                            (*raw_val.value).try_into().map_err(|_| {
+                                substrait_datafusion_err!(
+                                    "Failed to parse interval year month value"
+                                )
+                            })?;
+                        ScalarValue::IntervalYearMonth(Some(i32::from_le_bytes(
+                            value_slice,
+                        )))
+                    }
+                    // Kept for backwards compatibility, use IntervalDayToSecond instead
+                    INTERVAL_DAY_TIME_TYPE_REF => {
+                        let Some(Val::Value(raw_val)) = user_defined.val.as_ref() else {
+                            return substrait_err!("Interval day time value is empty");
+                        };
+                        let value_slice: [u8; 8] =
+                            (*raw_val.value).try_into().map_err(|_| {
+                                substrait_datafusion_err!(
+                                    "Failed to parse interval day time value"
+                                )
+                            })?;
+                        let days =
+                            i32::from_le_bytes(value_slice[0..4].try_into().unwrap());
+                        let milliseconds =
+                            i32::from_le_bytes(value_slice[4..8].try_into().unwrap());
+                        ScalarValue::IntervalDayTime(Some(IntervalDayTime {
+                            days,
+                            milliseconds,
+                        }))
+                    }
+                    INTERVAL_MONTH_DAY_NANO_TYPE_REF => {
+                        interval_month_day_nano(user_defined)?
+                    }
+                    _ => {
+                        return not_impl_err!(
+                            "Unsupported Substrait user defined type literal with ref {}",
+                            user_defined.type_reference
+                        )
+                    }
                 }
             }
         }
@@ -1877,6 +1910,7 @@ fn from_substrait_literal(
 
 fn from_substrait_null(
     null_type: &Type,
+    extensions: &Extensions,
     dfs_names: &[String],
     name_idx: &mut usize,
 ) -> Result<ScalarValue> {
@@ -1961,6 +1995,7 @@ fn from_substrait_null(
                 let field = Field::new_list_field(
                     from_substrait_type(
                         l.r#type.clone().unwrap().as_ref(),
+                        extensions,
                         dfs_names,
                         name_idx,
                     )?,
@@ -1979,7 +2014,8 @@ fn from_substrait_null(
                 }
             }
             r#type::Kind::Struct(s) => {
-                let fields = from_substrait_struct_type(s, dfs_names, name_idx)?;
+                let fields =
+                    from_substrait_struct_type(s, extensions, dfs_names, name_idx)?;
                 Ok(ScalarStructBuilder::new_null(fields))
             }
             _ => not_impl_err!("Unsupported Substrait type for null: {kind:?}"),
@@ -2033,8 +2069,8 @@ impl BuiltinExprBuilder {
         ctx: &SessionContext,
         f: &ScalarFunction,
         input_schema: &DFSchema,
-        extensions: &HashMap<u32, &String>,
-    ) -> Result<Arc<Expr>> {
+        extensions: &Extensions,
+    ) -> Result<Expr> {
         match self.expr_name.as_str() {
             "like" => {
                 Self::build_like_expr(ctx, false, f, input_schema, extensions).await
@@ -2058,18 +2094,16 @@ impl BuiltinExprBuilder {
         fn_name: &str,
         f: &ScalarFunction,
         input_schema: &DFSchema,
-        extensions: &HashMap<u32, &String>,
-    ) -> Result<Arc<Expr>> {
+        extensions: &Extensions,
+    ) -> Result<Expr> {
         if f.arguments.len() != 1 {
             return substrait_err!("Expect one argument for {fn_name} expr");
         }
         let Some(ArgType::Value(expr_substrait)) = &f.arguments[0].arg_type else {
             return substrait_err!("Invalid arguments type for {fn_name} expr");
         };
-        let arg = from_substrait_rex(ctx, expr_substrait, input_schema, extensions)
-            .await?
-            .as_ref()
-            .clone();
+        let arg =
+            from_substrait_rex(ctx, expr_substrait, input_schema, extensions).await?;
         let arg = Box::new(arg);
 
         let expr = match fn_name {
@@ -2086,7 +2120,7 @@ impl BuiltinExprBuilder {
             _ => return not_impl_err!("Unsupported builtin expression: {}", fn_name),
         };
 
-        Ok(Arc::new(expr))
+        Ok(expr)
     }
 
     async fn build_like_expr(
@@ -2094,48 +2128,56 @@ impl BuiltinExprBuilder {
         case_insensitive: bool,
         f: &ScalarFunction,
         input_schema: &DFSchema,
-        extensions: &HashMap<u32, &String>,
-    ) -> Result<Arc<Expr>> {
+        extensions: &Extensions,
+    ) -> Result<Expr> {
         let fn_name = if case_insensitive { "ILIKE" } else { "LIKE" };
-        if f.arguments.len() != 3 {
-            return substrait_err!("Expect three arguments for `{fn_name}` expr");
+        if f.arguments.len() != 2 && f.arguments.len() != 3 {
+            return substrait_err!("Expect two or three arguments for `{fn_name}` expr");
         }
 
         let Some(ArgType::Value(expr_substrait)) = &f.arguments[0].arg_type else {
             return substrait_err!("Invalid arguments type for `{fn_name}` expr");
         };
-        let expr = from_substrait_rex(ctx, expr_substrait, input_schema, extensions)
-            .await?
-            .as_ref()
-            .clone();
+        let expr =
+            from_substrait_rex(ctx, expr_substrait, input_schema, extensions).await?;
         let Some(ArgType::Value(pattern_substrait)) = &f.arguments[1].arg_type else {
             return substrait_err!("Invalid arguments type for `{fn_name}` expr");
         };
         let pattern =
-            from_substrait_rex(ctx, pattern_substrait, input_schema, extensions)
-                .await?
-                .as_ref()
-                .clone();
-        let Some(ArgType::Value(escape_char_substrait)) = &f.arguments[2].arg_type else {
-            return substrait_err!("Invalid arguments type for `{fn_name}` expr");
-        };
-        let escape_char_expr =
-            from_substrait_rex(ctx, escape_char_substrait, input_schema, extensions)
-                .await?
-                .as_ref()
-                .clone();
-        let Expr::Literal(ScalarValue::Utf8(escape_char)) = escape_char_expr else {
-            return substrait_err!(
-                "Expect Utf8 literal for escape char, but found {escape_char_expr:?}"
-            );
+            from_substrait_rex(ctx, pattern_substrait, input_schema, extensions).await?;
+
+        // Default case: escape character is Literal(Utf8(None))
+        let escape_char = if f.arguments.len() == 3 {
+            let Some(ArgType::Value(escape_char_substrait)) = &f.arguments[2].arg_type
+            else {
+                return substrait_err!("Invalid arguments type for `{fn_name}` expr");
+            };
+
+            let escape_char_expr =
+                from_substrait_rex(ctx, escape_char_substrait, input_schema, extensions)
+                    .await?;
+
+            match escape_char_expr {
+                Expr::Literal(ScalarValue::Utf8(escape_char_string)) => {
+                    // Convert Option<String> to Option<char>
+                    escape_char_string.and_then(|s| s.chars().next())
+                }
+                _ => {
+                    return substrait_err!(
+                    "Expect Utf8 literal for escape char, but found {escape_char_expr:?}"
+                )
+                }
+            }
+        } else {
+            None
         };
 
-        Ok(Arc::new(Expr::Like(Like {
+        Ok(Expr::Like(Like {
             negated: false,
             expr: Box::new(expr),
             pattern: Box::new(pattern),
-            escape_char: escape_char.map(|c| c.chars().next().unwrap()),
+            escape_char,
             case_insensitive,
-        })))
+        }))
     }
 }

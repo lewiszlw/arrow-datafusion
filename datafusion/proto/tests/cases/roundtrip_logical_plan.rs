@@ -21,30 +21,28 @@ use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 use std::vec;
 
-use arrow::array::{ArrayRef, FixedSizeListArray};
+use arrow::array::{
+    ArrayRef, FixedSizeListArray, Int32Builder, MapArray, MapBuilder, StringBuilder,
+};
 use arrow::datatypes::{
     DataType, Field, Fields, Int32Type, IntervalDayTimeType, IntervalMonthDayNanoType,
     IntervalUnit, Schema, SchemaRef, TimeUnit, UnionFields, UnionMode,
 };
+use prost::Message;
+
 use datafusion::datasource::file_format::arrow::ArrowFormatFactory;
 use datafusion::datasource::file_format::csv::CsvFormatFactory;
 use datafusion::datasource::file_format::format_as_file_type;
 use datafusion::datasource::file_format::parquet::ParquetFormatFactory;
-use datafusion_proto::logical_plan::file_formats::{
-    ArrowLogicalExtensionCodec, CsvLogicalExtensionCodec, ParquetLogicalExtensionCodec,
-};
-use prost::Message;
-
 use datafusion::datasource::provider::TableProviderFactory;
 use datafusion::datasource::TableProvider;
-use datafusion::execution::context::SessionState;
-use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
+use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::execution::FunctionRegistry;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::expr_fn::{
     approx_median, approx_percentile_cont, approx_percentile_cont_with_weight, count,
-    count_distinct, covar_pop, covar_samp, first_value, median, stddev, stddev_pop, sum,
-    var_pop, var_sample,
+    count_distinct, covar_pop, covar_samp, first_value, grouping, median, stddev,
+    stddev_pop, sum, var_pop, var_sample,
 };
 use datafusion::prelude::*;
 use datafusion::test_util::{TestTableFactory, TestTableProvider};
@@ -52,7 +50,7 @@ use datafusion_common::config::TableOptions;
 use datafusion_common::scalar::ScalarStructBuilder;
 use datafusion_common::{
     internal_datafusion_err, internal_err, not_impl_err, plan_err, DFSchema, DFSchemaRef,
-    DataFusionError, Result, ScalarValue,
+    DataFusionError, Result, ScalarValue, TableReference,
 };
 use datafusion_expr::dml::CopyTo;
 use datafusion_expr::expr::{
@@ -61,25 +59,30 @@ use datafusion_expr::expr::{
 };
 use datafusion_expr::logical_plan::{Extension, UserDefinedLogicalNodeCore};
 use datafusion_expr::{
-    Accumulator, AggregateExt, AggregateFunction, ColumnarValue, ExprSchemable,
-    LogicalPlan, Operator, PartitionEvaluator, ScalarUDF, ScalarUDFImpl, Signature,
-    TryCast, Volatility, WindowFrame, WindowFrameBound, WindowFrameUnits,
+    Accumulator, AggregateExt, AggregateFunction, AggregateUDF, ColumnarValue,
+    ExprSchemable, Literal, LogicalPlan, Operator, PartitionEvaluator, ScalarUDF,
+    Signature, TryCast, Volatility, WindowFrame, WindowFrameBound, WindowFrameUnits,
     WindowFunctionDefinition, WindowUDF, WindowUDFImpl,
 };
 use datafusion_functions_aggregate::average::avg_udaf;
 use datafusion_functions_aggregate::expr_fn::{
-    avg, bit_and, bit_or, bit_xor, bool_and, bool_or, corr,
+    array_agg, avg, bit_and, bit_or, bit_xor, bool_and, bool_or, corr,
 };
 use datafusion_functions_aggregate::string_agg::string_agg;
 use datafusion_proto::bytes::{
     logical_plan_from_bytes, logical_plan_from_bytes_with_extension_codec,
     logical_plan_to_bytes, logical_plan_to_bytes_with_extension_codec,
 };
+use datafusion_proto::logical_plan::file_formats::{
+    ArrowLogicalExtensionCodec, CsvLogicalExtensionCodec, ParquetLogicalExtensionCodec,
+};
 use datafusion_proto::logical_plan::to_proto::serialize_expr;
 use datafusion_proto::logical_plan::{
     from_proto, DefaultLogicalExtensionCodec, LogicalExtensionCodec,
 };
 use datafusion_proto::protobuf;
+
+use crate::cases::{MyAggregateUDF, MyAggregateUdfNode, MyRegexUdf, MyRegexUdfNode};
 
 #[cfg(feature = "json")]
 fn roundtrip_json_test(proto: &protobuf::LogicalExprNode) {
@@ -134,6 +137,9 @@ pub struct TestTableProto {
     /// URL of the table root
     #[prost(string, tag = "1")]
     pub url: String,
+    /// Qualified table name
+    #[prost(string, tag = "2")]
+    pub table_name: String,
 }
 
 #[derive(Debug)]
@@ -156,12 +162,14 @@ impl LogicalExtensionCodec for TestTableProviderCodec {
     fn try_decode_table_provider(
         &self,
         buf: &[u8],
+        table_ref: &TableReference,
         schema: SchemaRef,
         _ctx: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>> {
         let msg = TestTableProto::decode(buf).map_err(|_| {
             DataFusionError::Internal("Error decoding test table".to_string())
         })?;
+        assert_eq!(msg.table_name, table_ref.to_string());
         let provider = TestTableProvider {
             url: msg.url,
             schema,
@@ -171,6 +179,7 @@ impl LogicalExtensionCodec for TestTableProviderCodec {
 
     fn try_encode_table_provider(
         &self,
+        table_ref: &TableReference,
         node: Arc<dyn TableProvider>,
         buf: &mut Vec<u8>,
     ) -> Result<()> {
@@ -181,6 +190,7 @@ impl LogicalExtensionCodec for TestTableProviderCodec {
             .expect("Can't encode non-test tables");
         let msg = TestTableProto {
             url: table.url.clone(),
+            table_name: table_ref.to_string(),
         };
         msg.encode(buf).map_err(|_| {
             DataFusionError::Internal("Error encoding test table".to_string())
@@ -193,10 +203,7 @@ async fn roundtrip_custom_tables() -> Result<()> {
     let mut table_factories: HashMap<String, Arc<dyn TableProviderFactory>> =
         HashMap::new();
     table_factories.insert("TESTTABLE".to_string(), Arc::new(TestTableFactory {}));
-    let cfg = RuntimeConfig::new();
-    let env = RuntimeEnv::new(cfg).unwrap();
-    let ses = SessionConfig::new();
-    let mut state = SessionState::new_with_config_rt(ses, Arc::new(env));
+    let mut state = SessionStateBuilder::new().with_default_features().build();
     // replace factories
     *state.table_factories_mut() = table_factories;
     let ctx = SessionContext::new_with_state(state);
@@ -688,12 +695,15 @@ async fn roundtrip_expr_api() -> Result<()> {
         approx_median(lit(2)),
         approx_percentile_cont(lit(2), lit(0.5)),
         approx_percentile_cont_with_weight(lit(2), lit(1), lit(0.5)),
+        grouping(lit(1)),
         bit_and(lit(2)),
         bit_or(lit(2)),
         bit_xor(lit(2)),
         string_agg(col("a").cast_to(&DataType::Utf8, &schema)?, lit("|")),
         bool_and(lit(true)),
         bool_or(lit(true)),
+        array_agg(lit(1)),
+        array_agg(lit(1)).distinct().build().unwrap(),
     ];
 
     // ensure expressions created with the expr api can be round tripped
@@ -738,19 +748,13 @@ pub mod proto {
         pub k: u64,
 
         #[prost(message, optional, tag = "2")]
-        pub expr: ::core::option::Option<datafusion_proto::protobuf::LogicalExprNode>,
+        pub expr: Option<datafusion_proto::protobuf::LogicalExprNode>,
     }
 
     #[derive(Clone, PartialEq, Eq, ::prost::Message)]
     pub struct TopKExecProto {
         #[prost(uint64, tag = "1")]
         pub k: u64,
-    }
-
-    #[derive(Clone, PartialEq, ::prost::Message)]
-    pub struct MyRegexUdfNode {
-        #[prost(string, tag = "1")]
-        pub pattern: String,
     }
 }
 
@@ -866,6 +870,7 @@ impl LogicalExtensionCodec for TopKExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: SchemaRef,
         _ctx: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>> {
@@ -874,6 +879,7 @@ impl LogicalExtensionCodec for TopKExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: Arc<dyn TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> Result<()> {
@@ -882,51 +888,9 @@ impl LogicalExtensionCodec for TopKExtensionCodec {
 }
 
 #[derive(Debug)]
-struct MyRegexUdf {
-    signature: Signature,
-    // regex as original string
-    pattern: String,
-}
+pub struct UDFExtensionCodec;
 
-impl MyRegexUdf {
-    fn new(pattern: String) -> Self {
-        Self {
-            signature: Signature::uniform(
-                1,
-                vec![DataType::Int32],
-                Volatility::Immutable,
-            ),
-            pattern,
-        }
-    }
-}
-
-/// Implement the ScalarUDFImpl trait for MyRegexUdf
-impl ScalarUDFImpl for MyRegexUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn name(&self) -> &str {
-        "regex_udf"
-    }
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-    fn return_type(&self, args: &[DataType]) -> Result<DataType> {
-        if !matches!(args.first(), Some(&DataType::Utf8)) {
-            return plan_err!("regex_udf only accepts Utf8 arguments");
-        }
-        Ok(DataType::Int32)
-    }
-    fn invoke(&self, _args: &[ColumnarValue]) -> Result<ColumnarValue> {
-        unimplemented!()
-    }
-}
-
-#[derive(Debug)]
-pub struct ScalarUDFExtensionCodec {}
-
-impl LogicalExtensionCodec for ScalarUDFExtensionCodec {
+impl LogicalExtensionCodec for UDFExtensionCodec {
     fn try_decode(
         &self,
         _buf: &[u8],
@@ -943,6 +907,7 @@ impl LogicalExtensionCodec for ScalarUDFExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: SchemaRef,
         _ctx: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>> {
@@ -951,6 +916,7 @@ impl LogicalExtensionCodec for ScalarUDFExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: Arc<dyn TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> Result<()> {
@@ -959,13 +925,11 @@ impl LogicalExtensionCodec for ScalarUDFExtensionCodec {
 
     fn try_decode_udf(&self, name: &str, buf: &[u8]) -> Result<Arc<ScalarUDF>> {
         if name == "regex_udf" {
-            let proto = proto::MyRegexUdfNode::decode(buf).map_err(|err| {
-                DataFusionError::Internal(format!("failed to decode regex_udf: {}", err))
+            let proto = MyRegexUdfNode::decode(buf).map_err(|err| {
+                DataFusionError::Internal(format!("failed to decode regex_udf: {err}"))
             })?;
 
-            Ok(Arc::new(ScalarUDF::new_from_impl(MyRegexUdf::new(
-                proto.pattern,
-            ))))
+            Ok(Arc::new(ScalarUDF::from(MyRegexUdf::new(proto.pattern))))
         } else {
             not_impl_err!("unrecognized scalar UDF implementation, cannot decode")
         }
@@ -974,11 +938,39 @@ impl LogicalExtensionCodec for ScalarUDFExtensionCodec {
     fn try_encode_udf(&self, node: &ScalarUDF, buf: &mut Vec<u8>) -> Result<()> {
         let binding = node.inner();
         let udf = binding.as_any().downcast_ref::<MyRegexUdf>().unwrap();
-        let proto = proto::MyRegexUdfNode {
+        let proto = MyRegexUdfNode {
             pattern: udf.pattern.clone(),
         };
-        proto.encode(buf).map_err(|e| {
-            DataFusionError::Internal(format!("failed to encode udf: {e:?}"))
+        proto.encode(buf).map_err(|err| {
+            DataFusionError::Internal(format!("failed to encode udf: {err}"))
+        })?;
+        Ok(())
+    }
+
+    fn try_decode_udaf(&self, name: &str, buf: &[u8]) -> Result<Arc<AggregateUDF>> {
+        if name == "aggregate_udf" {
+            let proto = MyAggregateUdfNode::decode(buf).map_err(|err| {
+                DataFusionError::Internal(format!(
+                    "failed to decode aggregate_udf: {err}"
+                ))
+            })?;
+
+            Ok(Arc::new(AggregateUDF::from(MyAggregateUDF::new(
+                proto.result,
+            ))))
+        } else {
+            not_impl_err!("unrecognized aggregate UDF implementation, cannot decode")
+        }
+    }
+
+    fn try_encode_udaf(&self, node: &AggregateUDF, buf: &mut Vec<u8>) -> Result<()> {
+        let binding = node.inner();
+        let udf = binding.as_any().downcast_ref::<MyAggregateUDF>().unwrap();
+        let proto = MyAggregateUdfNode {
+            result: udf.result.clone(),
+        };
+        proto.encode(buf).map_err(|err| {
+            DataFusionError::Internal(format!("failed to encode udf: {err}"))
         })?;
         Ok(())
     }
@@ -1235,6 +1227,31 @@ fn round_trip_scalar_values() {
             ),
         ])))
         .unwrap(),
+        ScalarValue::try_from(&DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("key", DataType::Int32, true),
+                    Field::new("value", DataType::Utf8, false),
+                ])),
+                false,
+            )),
+            false,
+        ))
+        .unwrap(),
+        ScalarValue::try_from(&DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("key", DataType::Int32, true),
+                    Field::new("value", DataType::Utf8, true),
+                ])),
+                false,
+            )),
+            true,
+        ))
+        .unwrap(),
+        ScalarValue::Map(Arc::new(create_map_array_test_case())),
         ScalarValue::FixedSizeBinary(b"bar".to_vec().len() as i32, Some(b"bar".to_vec())),
         ScalarValue::FixedSizeBinary(0, None),
         ScalarValue::FixedSizeBinary(5, None),
@@ -1255,6 +1272,25 @@ fn round_trip_scalar_values() {
                         Input: {test_case:?}\n\nRoundtrip: {roundtrip:?}"
         );
     }
+}
+
+// create a map array [{joe:1}, {blogs:2, foo:4}, {}, null] for testing
+fn create_map_array_test_case() -> MapArray {
+    let string_builder = StringBuilder::new();
+    let int_builder = Int32Builder::with_capacity(4);
+    let mut builder = MapBuilder::new(None, string_builder, int_builder);
+    builder.keys().append_value("joe");
+    builder.values().append_value(1);
+    builder.append(true).unwrap();
+
+    builder.keys().append_value("blogs");
+    builder.values().append_value(2);
+    builder.keys().append_value("foo");
+    builder.values().append_value(4);
+    builder.append(true).unwrap();
+    builder.append(true).unwrap();
+    builder.append(false).unwrap();
+    builder.finish()
 }
 
 #[test]
@@ -1509,8 +1545,7 @@ fn roundtrip_null_scalar_values() {
 
     for test_case in test_types.into_iter() {
         let proto_scalar: protobuf::ScalarValue = (&test_case).try_into().unwrap();
-        let returned_scalar: datafusion::scalar::ScalarValue =
-            (&proto_scalar).try_into().unwrap();
+        let returned_scalar: ScalarValue = (&proto_scalar).try_into().unwrap();
         assert_eq!(format!("{:?}", &test_case), format!("{returned_scalar:?}"));
     }
 }
@@ -1839,22 +1874,19 @@ fn roundtrip_aggregate_udf() {
     struct Dummy {}
 
     impl Accumulator for Dummy {
-        fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
+        fn state(&mut self) -> Result<Vec<ScalarValue>> {
             Ok(vec![])
         }
 
-        fn update_batch(
-            &mut self,
-            _values: &[ArrayRef],
-        ) -> datafusion::error::Result<()> {
+        fn update_batch(&mut self, _values: &[ArrayRef]) -> Result<()> {
             Ok(())
         }
 
-        fn merge_batch(&mut self, _states: &[ArrayRef]) -> datafusion::error::Result<()> {
+        fn merge_batch(&mut self, _states: &[ArrayRef]) -> Result<()> {
             Ok(())
         }
 
-        fn evaluate(&mut self) -> datafusion::error::Result<ScalarValue> {
+        fn evaluate(&mut self) -> Result<ScalarValue> {
             Ok(ScalarValue::Float64(None))
         }
 
@@ -1922,25 +1954,27 @@ fn roundtrip_scalar_udf() {
 
 #[test]
 fn roundtrip_scalar_udf_extension_codec() {
-    let pattern = ".*";
-    let udf = ScalarUDF::from(MyRegexUdf::new(pattern.to_string()));
-    let test_expr =
-        Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(udf.clone()), vec![]));
-
+    let udf = ScalarUDF::from(MyRegexUdf::new(".*".to_owned()));
+    let test_expr = udf.call(vec!["foo".lit()]);
     let ctx = SessionContext::new();
-    ctx.register_udf(udf);
-
-    let extension_codec = ScalarUDFExtensionCodec {};
-    let proto: protobuf::LogicalExprNode =
-        match serialize_expr(&test_expr, &extension_codec) {
-            Ok(p) => p,
-            Err(e) => panic!("Error serializing expression: {:?}", e),
-        };
-    let round_trip: Expr =
-        from_proto::parse_expr(&proto, &ctx, &extension_codec).unwrap();
+    let proto = serialize_expr(&test_expr, &UDFExtensionCodec).expect("serialize expr");
+    let round_trip =
+        from_proto::parse_expr(&proto, &ctx, &UDFExtensionCodec).expect("parse expr");
 
     assert_eq!(format!("{:?}", &test_expr), format!("{round_trip:?}"));
+    roundtrip_json_test(&proto);
+}
 
+#[test]
+fn roundtrip_aggregate_udf_extension_codec() {
+    let udf = AggregateUDF::from(MyAggregateUDF::new("DataFusion".to_owned()));
+    let test_expr = udf.call(vec![42.lit()]);
+    let ctx = SessionContext::new();
+    let proto = serialize_expr(&test_expr, &UDFExtensionCodec).expect("serialize expr");
+    let round_trip =
+        from_proto::parse_expr(&proto, &ctx, &UDFExtensionCodec).expect("parse expr");
+
+    assert_eq!(format!("{:?}", &test_expr), format!("{round_trip:?}"));
     roundtrip_json_test(&proto);
 }
 
@@ -2066,22 +2100,19 @@ fn roundtrip_window() {
     struct DummyAggr {}
 
     impl Accumulator for DummyAggr {
-        fn state(&mut self) -> datafusion::error::Result<Vec<ScalarValue>> {
+        fn state(&mut self) -> Result<Vec<ScalarValue>> {
             Ok(vec![])
         }
 
-        fn update_batch(
-            &mut self,
-            _values: &[ArrayRef],
-        ) -> datafusion::error::Result<()> {
+        fn update_batch(&mut self, _values: &[ArrayRef]) -> Result<()> {
             Ok(())
         }
 
-        fn merge_batch(&mut self, _states: &[ArrayRef]) -> datafusion::error::Result<()> {
+        fn merge_batch(&mut self, _states: &[ArrayRef]) -> Result<()> {
             Ok(())
         }
 
-        fn evaluate(&mut self) -> datafusion::error::Result<ScalarValue> {
+        fn evaluate(&mut self) -> Result<ScalarValue> {
             Ok(ScalarValue::Float64(None))
         }
 

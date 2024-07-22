@@ -24,7 +24,7 @@ use datafusion::{
     },
     prelude::SessionContext,
 };
-use datafusion_common::not_impl_err;
+use datafusion_common::{not_impl_err, TableReference};
 
 use super::LogicalExtensionCodec;
 
@@ -53,6 +53,7 @@ impl LogicalExtensionCodec for CsvLogicalExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: arrow::datatypes::SchemaRef,
         _ctx: &datafusion::prelude::SessionContext,
     ) -> datafusion_common::Result<
@@ -63,6 +64,7 @@ impl LogicalExtensionCodec for CsvLogicalExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
@@ -81,22 +83,6 @@ impl LogicalExtensionCodec for CsvLogicalExtensionCodec {
         &self,
         __buf: &[u8],
         __node: Arc<dyn FileFormatFactory>,
-    ) -> datafusion_common::Result<()> {
-        Ok(())
-    }
-
-    fn try_decode_udf(
-        &self,
-        name: &str,
-        __buf: &[u8],
-    ) -> datafusion_common::Result<Arc<datafusion_expr::ScalarUDF>> {
-        not_impl_err!("LogicalExtensionCodec is not provided for scalar function {name}")
-    }
-
-    fn try_encode_udf(
-        &self,
-        __node: &datafusion_expr::ScalarUDF,
-        __buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
         Ok(())
     }
@@ -127,6 +113,7 @@ impl LogicalExtensionCodec for JsonLogicalExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: arrow::datatypes::SchemaRef,
         _ctx: &datafusion::prelude::SessionContext,
     ) -> datafusion_common::Result<
@@ -137,6 +124,7 @@ impl LogicalExtensionCodec for JsonLogicalExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
@@ -155,22 +143,6 @@ impl LogicalExtensionCodec for JsonLogicalExtensionCodec {
         &self,
         __buf: &[u8],
         __node: Arc<dyn FileFormatFactory>,
-    ) -> datafusion_common::Result<()> {
-        Ok(())
-    }
-
-    fn try_decode_udf(
-        &self,
-        name: &str,
-        __buf: &[u8],
-    ) -> datafusion_common::Result<Arc<datafusion_expr::ScalarUDF>> {
-        not_impl_err!("LogicalExtensionCodec is not provided for scalar function {name}")
-    }
-
-    fn try_encode_udf(
-        &self,
-        __node: &datafusion_expr::ScalarUDF,
-        __buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
         Ok(())
     }
@@ -201,6 +173,7 @@ impl LogicalExtensionCodec for ParquetLogicalExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: arrow::datatypes::SchemaRef,
         _ctx: &datafusion::prelude::SessionContext,
     ) -> datafusion_common::Result<
@@ -211,6 +184,7 @@ impl LogicalExtensionCodec for ParquetLogicalExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
@@ -229,22 +203,6 @@ impl LogicalExtensionCodec for ParquetLogicalExtensionCodec {
         &self,
         __buf: &[u8],
         __node: Arc<dyn FileFormatFactory>,
-    ) -> datafusion_common::Result<()> {
-        Ok(())
-    }
-
-    fn try_decode_udf(
-        &self,
-        name: &str,
-        __buf: &[u8],
-    ) -> datafusion_common::Result<Arc<datafusion_expr::ScalarUDF>> {
-        not_impl_err!("LogicalExtensionCodec is not provided for scalar function {name}")
-    }
-
-    fn try_encode_udf(
-        &self,
-        __node: &datafusion_expr::ScalarUDF,
-        __buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
         Ok(())
     }
@@ -275,6 +233,7 @@ impl LogicalExtensionCodec for ArrowLogicalExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: arrow::datatypes::SchemaRef,
         _ctx: &datafusion::prelude::SessionContext,
     ) -> datafusion_common::Result<
@@ -285,6 +244,7 @@ impl LogicalExtensionCodec for ArrowLogicalExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
@@ -303,22 +263,6 @@ impl LogicalExtensionCodec for ArrowLogicalExtensionCodec {
         &self,
         __buf: &[u8],
         __node: Arc<dyn FileFormatFactory>,
-    ) -> datafusion_common::Result<()> {
-        Ok(())
-    }
-
-    fn try_decode_udf(
-        &self,
-        name: &str,
-        __buf: &[u8],
-    ) -> datafusion_common::Result<Arc<datafusion_expr::ScalarUDF>> {
-        not_impl_err!("LogicalExtensionCodec is not provided for scalar function {name}")
-    }
-
-    fn try_encode_udf(
-        &self,
-        __node: &datafusion_expr::ScalarUDF,
-        __buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
         Ok(())
     }
@@ -349,6 +293,7 @@ impl LogicalExtensionCodec for AvroLogicalExtensionCodec {
     fn try_decode_table_provider(
         &self,
         _buf: &[u8],
+        _table_ref: &TableReference,
         _schema: arrow::datatypes::SchemaRef,
         _cts: &datafusion::prelude::SessionContext,
     ) -> datafusion_common::Result<
@@ -359,6 +304,7 @@ impl LogicalExtensionCodec for AvroLogicalExtensionCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &TableReference,
         _node: std::sync::Arc<dyn datafusion::datasource::TableProvider>,
         _buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
@@ -377,22 +323,6 @@ impl LogicalExtensionCodec for AvroLogicalExtensionCodec {
         &self,
         __buf: &[u8],
         __node: Arc<dyn FileFormatFactory>,
-    ) -> datafusion_common::Result<()> {
-        Ok(())
-    }
-
-    fn try_decode_udf(
-        &self,
-        name: &str,
-        __buf: &[u8],
-    ) -> datafusion_common::Result<Arc<datafusion_expr::ScalarUDF>> {
-        not_impl_err!("LogicalExtensionCodec is not provided for scalar function {name}")
-    }
-
-    fn try_encode_udf(
-        &self,
-        __node: &datafusion_expr::ScalarUDF,
-        __buf: &mut Vec<u8>,
     ) -> datafusion_common::Result<()> {
         Ok(())
     }

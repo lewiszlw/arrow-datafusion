@@ -164,7 +164,7 @@ message Union{
   repeated int32 type_ids = 3;
 }
 
-// Used for List/FixedSizeList/LargeList/Struct
+// Used for List/FixedSizeList/LargeList/Struct/Map
 message ScalarNestedValue {
   message Dictionary {
     bytes ipc_message = 1;
@@ -266,6 +266,7 @@ message ScalarValue{
     ScalarNestedValue list_value = 17;
     ScalarNestedValue fixed_size_list_value = 18;
     ScalarNestedValue struct_value = 32;
+    ScalarNestedValue map_value = 41;
 
     Decimal128 decimal128_value = 20;
     Decimal256 decimal256_value = 39;
@@ -409,6 +410,7 @@ message CsvOptions {
   string null_value = 12; // Optional representation of null value
   bytes comment = 13; // Optional comment character as a byte
   bytes double_quote = 14; // Indicates if quotes are doubled
+  bytes newlines_in_values = 15; // Indicates if newlines are supported in values
 }
 
 // Options controlling CSV format
