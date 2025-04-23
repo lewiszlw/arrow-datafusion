@@ -77,6 +77,12 @@ impl CoalescePartitionsExec {
             input.boundedness(),
         )
     }
+
+    /// Update fetch with the argument
+    pub fn with_fetch(mut self, fetch: Option<usize>) -> Self {
+        self.fetch = fetch;
+        self
+    }
 }
 
 impl DisplayAs for CoalescePartitionsExec {
