@@ -2016,8 +2016,14 @@ impl ContextProvider for SessionContextProvider<'_> {
             .into_iter()
             .map(|arg| {
                 simplifier
-                    .coerce(arg, &schema)
+                    .coerce(arg.clone(), &schema)
                     .and_then(|e| simplifier.simplify(e))
+                    // A named argument (`table = 'view'`) parses as a column
+                    // reference, whose type cannot be looked up in the empty
+                    // schema used here, so coercion fails. Fall back to
+                    // simplify-only (the pre-coercion behaviour) instead of
+                    // failing the function call.
+                    .or_else(|_| simplifier.simplify(arg))
             })
             .collect::<datafusion_common::Result<Vec<_>>>()?;
         let provider = tbl_func
